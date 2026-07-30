@@ -1,0 +1,25 @@
+name: Feature request
+description: 提议一个有明确边界的新能力
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: motivation
+    attributes:
+      label: 动机
+      description: 用户场景和当前限制是什么？
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 方案
+      description: 建议的接口、行为和验收标准是什么？
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 替代方案
+      description: 还考虑过哪些实现或取舍？

@@ -1,0 +1,14 @@
+/build/
+/out/
+/cmake-build-*/
+CMakeUserPresets.json
+compile_commands.json
+.cache/
+.idea/
+.vscode/
+*.log
+*.profraw
+*.profdata
+perf.data*
+.env
+config/pulsegate.local.yaml
