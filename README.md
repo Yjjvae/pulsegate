@@ -7,6 +7,8 @@ PulseGate 是一个用 C++20 和 Boost.Asio 逐步实现的 HTTP 网关学习项
 
 完整教学见 [PROJECT_TUTORIAL.md](PROJECT_TUTORIAL.md)。
 
+按日期记录的实际推进过程见 [docs/work-log.md](docs/work-log.md)。
+
 ## 当前能力
 
 - target-based CMake 工程；
