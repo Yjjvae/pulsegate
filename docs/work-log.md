@@ -111,6 +111,73 @@
 - GitHub `v0.1.0` Milestone、Issue 和 `main` Ruleset 尚未创建；
 - `build-and-test` 必需检查要在 CI 章节的 Workflow 首次成功运行后启用。
 
+## 2026-08-02
+
+### 开发工具：Codex CLI MCP 与 GitHub 远程协作
+
+完成内容：
+
+- 将本地仓库关联到 `https://github.com/Yjjvae/http_server.git`；
+- 确认本地 `main` 跟踪 `origin/main`；
+- 为 Ubuntu Codex CLI 添加官方 Playwright MCP；
+- 将 Playwright 配置为无界面的 Chromium 模式；
+- 下载与当前 Playwright MCP 版本匹配的 Chromium、Headless Shell 和 FFmpeg；
+- 添加 Context7 远程 MCP，并完成 OAuth 授权；
+- 添加 GitHub 官方远程 MCP，使用环境变量读取细粒度访问令牌；
+- 使用 GitHub MCP 读取账号信息、仓库根目录和最近 Commit；
+- 使用 Context7 查询 Boost.Asio 的 `io_context` 文档。
+
+验证结果：
+
+- Chromium 与 Headless Shell 均能报告版本 `151.0.7922.10`；
+- Context7 能识别 `/boostorg/asio` 并返回有效文档和代码示例；
+- GitHub MCP 成功认证为 `Yjjvae`；
+- GitHub MCP 能读取 `Yjjvae/http_server` 的目录和两个已有 Commit；
+- 整个验证过程没有创建 Issue、Pull Request 或远程 Commit。
+
+重要决策：
+
+- Playwright 使用 `--headless --browser chromium`，适配 Ubuntu CLI 环境；
+- GitHub Token 不写入 Codex 配置、项目文件或 Git 历史；
+- GitHub MCP 通过 `GITHUB_PAT_TOKEN` 环境变量读取凭据；
+- MCP 只按实际用途安装，避免重复添加文件系统、Shell 或 Git 工具。
+
+遗留事项：
+
+- GitHub MCP 写权限将在首次真实创建 Issue 或 Pull Request 时验证；
+- 远程 `v0.0.1` 标签状态尚未独立确认；
+- Playwright MCP 的完整网页操作将在需要端到端测试时验证。
+
+## 2026-08-03
+
+### 开发环境：VS Code 与 CMake 自动配置行为确认
+
+完成内容：
+
+- 检查项目中的 `CMakeLists.txt` 和 `CMakePresets.json`；
+- 确认项目没有提交 `.vscode/settings.json`；
+- 明确 VS Code 打开项目后自动配置来自 CMake Tools 的
+  `cmake.configureOnOpen` 默认行为；
+- 梳理“配置”和“构建”的边界，以及配置结果如何服务于代码补全；
+- 补录 8 月 2 日和 8 月 3 日的工程工作日志。
+
+验证结果：
+
+- `CMakePresets.json` 中的 Debug、Release、ASan 和 TSan Preset 均保持完整；
+- Debug Preset 的生成目录仍为 `build/debug`；
+- 本次检查没有修改 CMake 配置或构建目标。
+
+重要决策：
+
+- 当前保留打开项目时自动配置，减少初学阶段手动同步构建信息的成本；
+- 不为关闭自动配置而新增 `.vscode/settings.json`；
+- 将 CMake 配置理解为“生成构建规则”，与实际编译步骤分开学习。
+
+遗留事项：
+
+- 工作区存在未跟踪的 `.playwright-mcp/` 运行产物，暂不删除或提交；
+- 后续确认该目录仅包含可再生成产物后，再决定是否加入 `.gitignore`。
+
 ## 后续记录模板
 
 ```markdown

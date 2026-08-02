@@ -12,3 +12,4 @@ compile_commands.json
 perf.data*
 .env
 config/pulsegate.local.yaml
+/.playwright-mcp/
