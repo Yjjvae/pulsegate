@@ -175,8 +175,40 @@
 
 遗留事项：
 
-- 工作区存在未跟踪的 `.playwright-mcp/` 运行产物，暂不删除或提交；
-- 后续确认该目录仅包含可再生成产物后，再决定是否加入 `.gitignore`。
+- `.playwright-mcp/` 已确认为可再生成的运行产物，并加入 `.gitignore`。
+
+### 第四章：GitHub 工作流收尾
+
+完成内容：
+
+- 将本地工作日志 Commit 推送到 `origin/main`；
+- 在 GitHub 创建 `v0.1.0` Milestone；
+- 为同步 TCP 接收、最小 GET 解析、HTTP 响应和回环集成测试创建 Issue；
+- 创建 `docs/chapter-4-closeout` 分支；
+- 使用真实文档变更演练分支、Commit、Push 和 Pull Request 流程；
+- 核对远端 Tag、分支、Issue、PR、Release、Actions 和仓库合并设置。
+
+验证结果：
+
+- 远端 `v0.0.1` Tag 正确指向阶段 0 快照；
+- `v0.1.0` Milestone 和四个 Issue 创建成功；
+- Bug 与 Feature Issue 模板引用的默认标签均存在；
+- GitHub MCP 对私有仓库具备读取、Issue 和 Pull Request 权限；
+- 本次没有修改 C++、CMake 或测试代码。
+
+重要决策：
+
+- 从后续功能开发开始使用短生命周期分支和 Pull Request；
+- `v0.1.0` 的 Issue 直接对应下一阶段可验收的小任务；
+- 仓库仍保持 Private，不在未确认公开范围前改变可见性；
+- CI 状态检查等到创建 `build-and-test` Workflow 后再设为必需检查。
+
+遗留事项：
+
+- 当前 GitHub Token 缺少 Administration 写权限，尚不能修改仓库简介、Topics、
+  merge 策略和自动删除分支设置；
+- Private 免费仓库不能启用所需 Ruleset；公开仓库后再保护 `main`；
+- `build-and-test` Workflow 按后续 CI 章节实现。
 
 ## 后续记录模板
 
