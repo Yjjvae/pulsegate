@@ -186,6 +186,9 @@
 - 为同步 TCP 接收、最小 GET 解析、HTTP 响应和回环集成测试创建 Issue；
 - 创建 `docs/chapter-4-closeout` 分支；
 - 使用真实文档变更演练分支、Commit、Push 和 Pull Request 流程；
+- 添加仓库简介和 C++/Boost.Asio/CMake 相关 Topics；
+- 将 Pull Request 合并策略收敛为 squash merge；
+- 开启合并后自动删除远端分支；
 - 核对远端 Tag、分支、Issue、PR、Release、Actions 和仓库合并设置。
 
 验证结果：
@@ -194,19 +197,20 @@
 - `v0.1.0` Milestone 和四个 Issue 创建成功；
 - Bug 与 Feature Issue 模板引用的默认标签均存在；
 - GitHub MCP 对私有仓库具备读取、Issue 和 Pull Request 权限；
+- 首个文档 Pull Request `#5` 已通过 squash merge 合入 `main`；
+- 仓库只允许 squash merge，并会自动删除已合并分支；
 - 本次没有修改 C++、CMake 或测试代码。
 
 重要决策：
 
 - 从后续功能开发开始使用短生命周期分支和 Pull Request；
 - `v0.1.0` 的 Issue 直接对应下一阶段可验收的小任务；
+- 主线只保留 squash 后的完整逻辑变化，不开放 merge commit 和 rebase merge；
 - 仓库仍保持 Private，不在未确认公开范围前改变可见性；
 - CI 状态检查等到创建 `build-and-test` Workflow 后再设为必需检查。
 
 遗留事项：
 
-- 当前 GitHub Token 缺少 Administration 写权限，尚不能修改仓库简介、Topics、
-  merge 策略和自动删除分支设置；
 - Private 免费仓库不能启用所需 Ruleset；公开仓库后再保护 `main`；
 - `build-and-test` Workflow 按后续 CI 章节实现。
 
