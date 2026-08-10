@@ -214,6 +214,48 @@
 - Private 免费仓库不能启用所需 Ruleset；公开仓库后再保护 `main`；
 - `build-and-test` Workflow 按后续 CI 章节实现。
 
+## 2026-08-10
+
+### 第六章：Boost.Asio 同步 TCP/HTTP 基线
+
+完成内容：
+
+- 创建 `feat/sync-http-baseline` 功能分支；
+- 新增 `pulsegate_net` 静态库，将网络实现与阶段 0 核心库分开；
+- 使用 Boost.Asio 完成同步 accept、分段 read 和完整 write 流程；
+- 新增独立程序 `pulsegate_sync_baseline`，支持
+  `--listen HOST:PORT`、IPv4、方括号 IPv6 和端口 `0`；
+- 设置 `SO_REUSEADDR` 与可配置 backlog，并提供包含操作上下文的启动错误；
+- 实现最小 GET 请求行校验，以及 200、400、405 和 431 响应；
+- 将请求头限制为 16 KiB，客户端 EOF、连接重置和提前关闭均隔离在单条连接；
+- 新增 9 个真实回环网络集成测试；
+- 更新 README、开发验收命令和第六章工作日志。
+
+验证结果：
+
+- Debug 与 Release 构建成功；
+- Debug 下 11/11 测试通过；
+- ASan/UBSan 下 11/11 测试通过，没有 Sanitizer 报告；
+- `PULSEGATE_WARNINGS_AS_ERRORS=ON` 构建成功；
+- 100 个串行 TCP 请求全部得到 `HTTP/1.1 200 OK`；
+- `curl --noproxy '*'` 手工请求得到 `Content-Length: 12` 和
+  `hello world\n`；
+- 服务器析构后，同一端口能够重新绑定。
+
+重要决策：
+
+- 同步服务器单独构建为教学基线，现有 `pulsegate` 主程序不链接网络实现；
+- 预期的连接错误使用 `boost::system::error_code`，启动配置错误由 `main()` 捕获；
+- 使用 `boost::asio::write` 处理短写，不直接假设一次写操作能发送完整响应；
+- 测试绑定 `127.0.0.1:0`，避免硬编码端口和并行测试冲突；
+- 本阶段不引入线程池、异步回调或并发性能声明。
+
+遗留事项：
+
+- 同步模型会被慢客户端阻塞，这是下一阶段异步架构要解决的问题；
+- 完整 HTTP/1.1 增量解析、持久连接和协议限制将在第七章实现；
+- CI Workflow 与 `build-and-test` 必需检查仍按后续 CI 章节实现。
+
 ## 后续记录模板
 
 ```markdown
