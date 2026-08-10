@@ -480,8 +480,9 @@ std::size_t HttpServer::closedCount(StopReason reason) const {
     return registry_->closedCount(reason);
 }
 
-std::shared_ptr<Router> HttpServer::makeDefaultRouter() {
-    auto router = std::make_shared<Router>();
+std::shared_ptr<Router> HttpServer::makeDefaultRouter(
+    std::optional<RateLimitConfig> global_rate_limit) {
+    auto router = std::make_shared<Router>(std::move(global_rate_limit));
     const auto text = [](std::string body) {
         return
             [body = std::move(body)](RequestContext&, HttpRequest) -> net::Awaitable<HttpResponse> {
@@ -503,7 +504,18 @@ std::shared_ptr<Router> HttpServer::makeDefaultRouter() {
     add_get_and_head("/healthz", "healthz", text("ok\n"));
     add_get_and_head("/livez", "livez", text("alive\n"));
     add_get_and_head("/readyz", "readyz", text("ready\n"));
-    add_get_and_head("/metrics", "metrics", text("pulsegate_ready 1\n"));
+    const std::weak_ptr<Router> weak_router = router;
+    const auto metrics = [weak_router](RequestContext&,
+                                       HttpRequest) -> net::Awaitable<HttpResponse> {
+        HttpResponse response;
+        response.body = "pulsegate_ready 1\n";
+        if (const auto locked_router = weak_router.lock()) {
+            response.body.append(locked_router->rateLimitMetrics());
+        }
+        response.headers.add("Content-Type", "text/plain; version=0.0.4");
+        co_return response;
+    };
+    add_get_and_head("/metrics", "metrics", metrics);
     add_get_and_head("/api/version", "version",
                      text(std::string(pulsegate::core::version()) + "\n"));
     router->add(
