@@ -7,9 +7,11 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 
 #include "pulsegate/core/version.h"
 #include "pulsegate/http/http_server.h"
+#include "pulsegate/runtime/asio_runtime.h"
 
 namespace {
 
@@ -51,11 +53,25 @@ pulsegate::net::ListenConfig parseListenAddress(std::string_view value) {
     return config;
 }
 
+std::size_t parseThreadCount(std::string_view value) {
+    std::uint32_t count = 0;
+    const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), count);
+    if (value.empty() || error != std::errc{} || end != value.data() + value.size() || count == 0) {
+        throw std::invalid_argument("thread count must be a positive integer");
+    }
+    return count;
+}
+
+std::size_t defaultThreadCount() {
+    const auto detected = std::thread::hardware_concurrency();
+    return detected == 0 ? 1U : static_cast<std::size_t>(detected);
+}
+
 void printUsage(std::ostream& output) {
     output << "PulseGate " << pulsegate::core::version() << '\n'
-           << "Usage: pulsegate [--listen HOST:PORT] [--help | --version]\n\n"
-           << "Single-threaded coroutine HTTP server.\n"
-           << "Example: pulsegate --listen 127.0.0.1:8080\n";
+           << "Usage: pulsegate [--listen HOST:PORT] [--threads N] [--help | --version]\n\n"
+           << "Multi-threaded Boost.Asio coroutine HTTP server.\n"
+           << "Example: pulsegate --listen 127.0.0.1:8080 --threads 4\n";
 }
 
 }  // namespace
@@ -63,6 +79,7 @@ void printUsage(std::ostream& output) {
 int main(int argc, char* argv[]) {
     try {
         pulsegate::net::ListenConfig config;
+        std::size_t thread_count = defaultThreadCount();
         for (int index = 1; index < argc; ++index) {
             const std::string_view argument(argv[index]);
             if (argument == "--version") {
@@ -81,19 +98,27 @@ int main(int argc, char* argv[]) {
                 config = parseListenAddress(argv[++index]);
                 continue;
             }
+            if (argument == "--threads" && index + 1 < argc) {
+                thread_count = parseThreadCount(argv[++index]);
+                continue;
+            }
             throw std::invalid_argument("unknown or incomplete argument: " + std::string(argument));
         }
 
-        boost::asio::io_context context(1);
-        pulsegate::http::HttpServer server(context, config);
+        pulsegate::runtime::AsioRuntime runtime(thread_count);
+        pulsegate::http::HttpServer server(runtime.context(), config);
         const auto endpoint = server.localEndpoint();
         std::cout << "PulseGate listening on " << endpoint.address().to_string() << ':'
                   << endpoint.port() << '\n';
 
-        boost::asio::signal_set signals(context, SIGINT, SIGTERM);
-        signals.async_wait([&server](const boost::system::error_code&, int) { server.stop(); });
+        boost::asio::signal_set signals(runtime.context(), SIGINT, SIGTERM);
+        signals.async_wait([&server, &runtime](const boost::system::error_code&, int) {
+            server.stop();
+            runtime.requestStop();
+        });
         server.start();
-        context.run();
+        runtime.start();
+        runtime.join();
     } catch (const std::exception& error) {
         std::cerr << "PulseGate failed: " << error.what() << '\n';
         return 1;

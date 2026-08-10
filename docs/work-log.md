@@ -353,6 +353,46 @@
 - 目前没有写操作 deadline；反向代理和上游 DNS/连接/响应期限会在引入上游客户端后实现；
 - 发布 `v0.3.0` 标签、PR 合并和 CI 检查将在本阶段工程收尾时完成。
 
+## 2026-08-10
+
+### 第十章：多线程 `io_context` 与 strand
+
+完成内容：
+
+- 新增 `runtime::AsioRuntime`，管理一个 `io_context`、可选 work guard 和 N 个
+  `std::jthread` worker；拒绝 0 线程，重复 start 抛出错误，析构时请求自然停止并 join；
+- Runtime 捕获工作线程中未观察的异常，统一报告后释放 work guard；
+- 主程序改为 Runtime 装配，新增 `--threads N`；默认使用硬件并发数，SIGINT/SIGTERM
+  先请求 Server drain，再释放 Runtime work guard；
+- 保留 Listener strand，并确认每次 accept 均创建绑定独立 strand 的 socket；Session 的
+  Socket、Parser、Buffer、Timer 和状态继续只在该 executor 上修改；
+- 新增 Runtime 单元测试与多 worker 回环测试，覆盖 1/2/4 worker、同 Session 串行、跨
+  Session 并行、外部线程 stop 和 300 条连接后的 Registry 清空；
+- 项目开发版本升级到 `0.4.0`，补充多线程验收命令和 worker 对照基准记录。
+
+验证结果：
+
+- Debug、ASan/UBSan、TSan 完整 CTest 通过；
+- Release 和 `PULSEGATE_WARNINGS_AS_ERRORS=ON` 构建通过；
+- Release `wrk -t2 -c100 -d15s --latency` worker 对照完成：1/2/4/8 worker 分别为
+  121,216.78 / 238,339.27 / 311,228.23 / 259,467.59 RPS；4 worker 的 P99 为 437 µs，
+  结果和环境记录在 `docs/benchmarks/v0.4.0-worker-comparison.md`。
+
+重要决策：
+
+- Runtime 只管理事件循环与 worker，不拥有 HTTP 协议、Session 或业务路由；`main()` 负责
+  装配并保证 Server、Registry 和 signal handler 存活到 worker join 之后；
+- 停机不调用 `io_context.stop()`：Server 先取消 Listener 并 drain Session，Runtime 再
+  reset work guard，让已排队的取消和清理 handler 运行；
+- strand 是单 Session 的串行化边界，不是全局锁，也不保证同一连接始终在同一个线程；
+- 测试中的 `sleep_for` 只用作并发探针，生产 handler 禁止阻塞 I/O worker。
+
+遗留事项：
+
+- 阶段 5 将把同步 `RequestHandler` 升级为 async Router，并为静态资源引入受限的专用
+  blocking pool；
+- raw epoll 是可选面试实验，保持与主 Boost.Asio 工程分离。
+
 ## 后续记录模板
 
 ```markdown
