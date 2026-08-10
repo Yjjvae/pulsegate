@@ -25,6 +25,11 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--close-after-header", action="store_true")
     parser.add_argument("--split-header", action="store_true")
     parser.add_argument("--stall-body", action="store_true")
+    parser.add_argument(
+        "--keep-alive",
+        action="store_true",
+        help="serve multiple complete requests on one TCP connection",
+    )
     return parser.parse_args()
 
 
@@ -42,41 +47,56 @@ async def main() -> None:
     async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         connection_id = next(sequence)
         try:
-            raw = await reader.readuntil(b"\r\n\r\n")
-            headers = raw.decode("iso-8859-1")
-            print(f"{args.name} connection={connection_id} request_id={request_id(headers)}", flush=True)
-            if args.delay_ms:
-                await asyncio.sleep(args.delay_ms / 1000)
-            body = args.body.encode()
-            reason = "OK" if args.status == 200 else "Mock Status"
-            if args.chunked:
-                header = (
-                    f"HTTP/1.1 {args.status} {reason}\r\n"
-                    "Content-Type: text/plain\r\nTransfer-Encoding: chunked\r\n\r\n"
-                ).encode()
-            else:
-                header = (
-                    f"HTTP/1.1 {args.status} {reason}\r\n"
-                    f"Content-Type: text/plain\r\nContent-Length: {len(body)}\r\n\r\n"
-                ).encode()
-            if args.split_header:
-                midpoint = len(header) // 2
-                writer.write(header[:midpoint])
+            while True:
+                raw = await reader.readuntil(b"\r\n\r\n")
+                headers = raw.decode("iso-8859-1")
+                for line in headers.split("\r\n"):
+                    if line.lower().startswith("content-length:"):
+                        await reader.readexactly(int(line.split(":", 1)[1].strip()))
+                        break
+                print(
+                    f"{args.name} connection={connection_id} request_id={request_id(headers)}",
+                    flush=True,
+                )
+                if args.delay_ms:
+                    await asyncio.sleep(args.delay_ms / 1000)
+                body = args.body.encode()
+                reason = "OK" if args.status == 200 else "Mock Status"
+                connection = "keep-alive" if args.keep_alive else "close"
+                if args.chunked:
+                    header = (
+                        f"HTTP/1.1 {args.status} {reason}\r\n"
+                        "Content-Type: text/plain\r\n"
+                        f"Connection: {connection}\r\n"
+                        "Transfer-Encoding: chunked\r\n\r\n"
+                    ).encode()
+                else:
+                    header = (
+                        f"HTTP/1.1 {args.status} {reason}\r\n"
+                        "Content-Type: text/plain\r\n"
+                        f"Connection: {connection}\r\n"
+                        f"Content-Length: {len(body)}\r\n\r\n"
+                    ).encode()
+                if args.split_header:
+                    midpoint = len(header) // 2
+                    writer.write(header[:midpoint])
+                    await writer.drain()
+                    await asyncio.sleep(0.01)
+                    writer.write(header[midpoint:])
+                else:
+                    writer.write(header)
                 await writer.drain()
-                await asyncio.sleep(0.01)
-                writer.write(header[midpoint:])
-            else:
-                writer.write(header)
-            await writer.drain()
-            if args.close_after_header:
-                return
-            if args.stall_body:
-                await asyncio.Future()
-            if args.chunked:
-                writer.write(f"{len(body):X}\r\n".encode() + body + b"\r\n0\r\n\r\n")
-            else:
-                writer.write(body)
-            await writer.drain()
+                if args.close_after_header:
+                    return
+                if args.stall_body:
+                    await asyncio.Future()
+                if args.chunked:
+                    writer.write(f"{len(body):X}\r\n".encode() + body + b"\r\n0\r\n\r\n")
+                else:
+                    writer.write(body)
+                await writer.drain()
+                if not args.keep_alive:
+                    return
         except (asyncio.IncompleteReadError, ConnectionError):
             pass
         finally:

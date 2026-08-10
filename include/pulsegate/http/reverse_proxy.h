@@ -3,19 +3,19 @@
 #include <atomic>
 #include <chrono>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include "pulsegate/http/http_response_parser.h"
 #include "pulsegate/http/router.h"
+#include "pulsegate/http/upstream_endpoint.h"
+#include "pulsegate/http/upstream_health.h"
+#include "pulsegate/http/upstream_pool.h"
 #include "pulsegate/net/deadline.h"
 
 namespace pulsegate::http {
-
-struct UpstreamEndpoint {
-    std::string host;
-    std::string service;
-};
 
 struct ProxyLimits {
     HttpResponseParserLimits response_parser{};
@@ -25,6 +25,9 @@ struct ProxyLimits {
     std::chrono::milliseconds connect_timeout{2000};
     std::chrono::milliseconds response_timeout{5000};
     std::chrono::milliseconds total_timeout{10000};
+    HealthThresholds health_thresholds{};
+    PoolLimits pool_limits{};
+    bool count_5xx_as_health_failure{true};
 };
 
 enum class ProxyState {
@@ -56,6 +59,7 @@ enum class ProxyError {
     ResponseTimeout,
     UpstreamProtocol,
     UpstreamBodyTooLarge,
+    NoHealthyUpstream,
     Cancelled,
     UnsupportedRequest
 };
@@ -64,6 +68,8 @@ struct ProxyResult {
     ProxyError error{ProxyError::None};
     HttpResponse response;
     UpstreamEndpoint upstream;
+    bool reusable{false};
+    int upstream_status{0};
 };
 
 [[nodiscard]] std::string serializeUpstreamRequest(const HttpRequest& request,
@@ -76,7 +82,7 @@ struct ProxyResult {
 class ProxySession : public std::enable_shared_from_this<ProxySession> {
    public:
     ProxySession(net::asio::any_io_executor executor, UpstreamEndpoint upstream,
-                 ProxyLimits limits = {});
+                 ProxyLimits limits = {}, UpstreamLease lease = {});
 
     net::Awaitable<ProxyResult> execute(RequestContext& context, HttpRequest request);
     // Streams a chunked downstream response after upstream headers are
@@ -84,6 +90,7 @@ class ProxySession : public std::enable_shared_from_this<ProxySession> {
     // close response; an HTTP error body must never follow partial bytes.
     net::Awaitable<ProxyResult> forward(RequestContext& context, HttpRequest request);
     void cancel(ProxyStopReason reason);
+    [[nodiscard]] UpstreamLease takeLease();
     [[nodiscard]] ProxyState state() const noexcept;
     [[nodiscard]] ProxyStopReason stopReason() const noexcept;
 
@@ -101,8 +108,8 @@ class ProxySession : public std::enable_shared_from_this<ProxySession> {
     net::asio::any_io_executor executor_;
     UpstreamEndpoint upstream_;
     ProxyLimits limits_;
-    net::tcp::resolver resolver_;
-    net::tcp::socket socket_;
+    std::shared_ptr<UpstreamConnection> connection_;
+    std::optional<UpstreamLease> lease_;
     std::shared_ptr<net::Deadline> phase_deadline_;
     std::shared_ptr<net::Deadline> total_deadline_;
     net::Buffer input_;
@@ -112,13 +119,14 @@ class ProxySession : public std::enable_shared_from_this<ProxySession> {
     ProxyStopReason stop_reason_{ProxyStopReason::None};
 };
 
-// Router handler with lock-free round-robin selection. Health probing and
-// connection pooling deliberately arrive in stage 7; every configured endpoint
-// is eligible in this stage.
+// Router handler with lock-free round-robin selection and immutable health
+// snapshots. Connection pooling is introduced alongside this stage.
 class ReverseProxy {
    public:
     ReverseProxy(std::vector<UpstreamEndpoint> upstreams, ProxyLimits limits = {});
     net::Awaitable<HttpResponse> operator()(RequestContext& context, HttpRequest request) const;
+    [[nodiscard]] std::shared_ptr<HealthStateStore> health() const noexcept;
+    void stop() const;
 
    private:
     struct State {
@@ -126,6 +134,11 @@ class ReverseProxy {
             : upstreams(std::move(values)), limits(std::move(configured_limits)) {}
         std::vector<UpstreamEndpoint> upstreams;
         ProxyLimits limits;
+        std::shared_ptr<HealthStateStore> health;
+        [[nodiscard]] std::shared_ptr<UpstreamPool> poolFor(std::size_t index,
+                                                            net::asio::any_io_executor executor);
+        mutable std::mutex pools_mutex;
+        std::vector<std::shared_ptr<UpstreamPool>> pools;
         std::atomic<std::size_t> next{0};
     };
     std::shared_ptr<State> state_;

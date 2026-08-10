@@ -9,6 +9,9 @@ target_sources(
     unit/router_test.cpp
     unit/reverse_proxy_test.cpp
     unit/static_file_handler_test.cpp
+  unit/upstream_health_test.cpp
+  unit/health_checker_test.cpp
+  unit/upstream_pool_test.cpp
     unit/deadline_test.cpp
     unit/asio_runtime_test.cpp
     unit/smoke_test.cpp

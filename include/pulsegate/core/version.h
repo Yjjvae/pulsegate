@@ -5,7 +5,7 @@
 namespace pulsegate::core {
 
 inline constexpr std::string_view kProjectName{"PulseGate"};
-inline constexpr std::string_view kVersion{"0.6.0"};
+inline constexpr std::string_view kVersion{"0.7.0"};
 
 [[nodiscard]] std::string_view version() noexcept;
 

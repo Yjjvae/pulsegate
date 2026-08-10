@@ -81,6 +81,7 @@ target_sources(
   PRIVATE
     http/headers.cpp
     http/file_service.cpp
+    http/health_checker.cpp
     http/http_parser.cpp
     http/http_request.cpp
     http/http_response.cpp
@@ -89,6 +90,9 @@ target_sources(
     http/router.cpp
     http/reverse_proxy.cpp
     http/static_file_handler.cpp
+    http/upstream_connection.cpp
+    http/upstream_health.cpp
+    http/upstream_pool.cpp
 )
 target_include_directories(
   pulsegate_http

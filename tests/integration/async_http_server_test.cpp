@@ -121,45 +121,55 @@ class MultiThreadedRunningServer {
 
 class MockUpstream {
    public:
-    explicit MockUpstream(std::vector<std::string> response_fragments)
+    explicit MockUpstream(std::vector<std::string> response_fragments,
+                          std::size_t requests_to_serve = 1)
         : acceptor_(context_, tcp::endpoint(asio::ip::make_address("127.0.0.1"), 0)),
-          response_fragments_(std::move(response_fragments)) {
+          response_fragments_(std::move(response_fragments)),
+          requests_to_serve_(requests_to_serve) {
+        socket_ = std::make_shared<tcp::socket>(context_);
         thread_ = std::jthread([this] {
             try {
-                tcp::socket socket(context_);
-                acceptor_.accept(socket);
+                acceptor_.accept(*socket_);
+                connection_count_.fetch_add(1, std::memory_order_relaxed);
                 std::array<char, 1024> storage{};
-                std::size_t expected_body_bytes = 0;
-                bool headers_complete = false;
-                for (;;) {
-                    const auto count = socket.read_some(asio::buffer(storage));
-                    request_.append(storage.data(), count);
-                    const auto header_end = request_.find("\r\n\r\n");
-                    if (header_end != std::string::npos && !headers_complete) {
-                        const auto content_length = request_.find("Content-Length: ");
-                        if (content_length != std::string::npos && content_length < header_end) {
-                            const auto begin =
-                                content_length + std::string_view("Content-Length: ").size();
-                            const auto end = request_.find("\r\n", begin);
-                            const auto [parsed_end, error] =
-                                std::from_chars(request_.data() + begin, request_.data() + end,
-                                                expected_body_bytes);
-                            if (error != std::errc{} || parsed_end != request_.data() + end) {
-                                throw std::runtime_error(
-                                    "mock upstream received an invalid Content-Length");
+                for (std::size_t request_index = 0; request_index < requests_to_serve_;
+                     ++request_index) {
+                    std::string current_request;
+                    std::size_t expected_body_bytes = 0;
+                    bool headers_complete = false;
+                    for (;;) {
+                        const auto count = socket_->read_some(asio::buffer(storage));
+                        current_request.append(storage.data(), count);
+                        const auto header_end = current_request.find("\r\n\r\n");
+                        if (header_end != std::string::npos && !headers_complete) {
+                            const auto content_length = current_request.find("Content-Length: ");
+                            if (content_length != std::string::npos &&
+                                content_length < header_end) {
+                                const auto begin =
+                                    content_length + std::string_view("Content-Length: ").size();
+                                const auto end = current_request.find("\r\n", begin);
+                                const auto [parsed_end, error] = std::from_chars(
+                                    current_request.data() + begin, current_request.data() + end,
+                                    expected_body_bytes);
+                                if (error != std::errc{} ||
+                                    parsed_end != current_request.data() + end) {
+                                    throw std::runtime_error(
+                                        "mock upstream received an invalid Content-Length");
+                                }
                             }
+                            headers_complete = true;
                         }
-                        headers_complete = true;
+                        if (headers_complete &&
+                            current_request.size() >= header_end + 4 + expected_body_bytes) {
+                            break;
+                        }
                     }
-                    if (headers_complete &&
-                        request_.size() >= header_end + 4 + expected_body_bytes) {
-                        break;
+                    request_.append(current_request);
+                    for (const auto& fragment : response_fragments_) {
+                        asio::write(*socket_, asio::buffer(fragment));
                     }
                 }
                 received_.store(true, std::memory_order_release);
-                for (const auto& fragment : response_fragments_) {
-                    asio::write(socket, asio::buffer(fragment));
-                }
             } catch (const boost::system::system_error&) {
             }
         });
@@ -171,6 +181,7 @@ class MockUpstream {
     ~MockUpstream() {
         boost::system::error_code ignored;
         acceptor_.close(ignored);
+        socket_->close(ignored);
         if (thread_.joinable()) thread_.join();
     }
 
@@ -183,13 +194,19 @@ class MockUpstream {
     [[nodiscard]] bool received() const {
         return received_.load(std::memory_order_acquire);
     }
+    [[nodiscard]] std::size_t connectionCount() const {
+        return connection_count_.load(std::memory_order_relaxed);
+    }
 
    private:
     asio::io_context context_{1};
     tcp::acceptor acceptor_;
     std::vector<std::string> response_fragments_;
+    std::size_t requests_to_serve_;
     std::string request_;
     std::atomic_bool received_{false};
+    std::atomic_size_t connection_count_{0};
+    std::shared_ptr<tcp::socket> socket_;
     std::jthread thread_;
 };
 
@@ -197,7 +214,13 @@ class ProxyRunningServer {
    public:
     explicit ProxyRunningServer(std::vector<pulsegate::http::UpstreamEndpoint> upstreams)
         : router_(std::make_shared<pulsegate::http::Router>()),
-          proxy_(std::move(upstreams)),
+          proxy_(std::move(upstreams),
+                 [] {
+              pulsegate::http::ProxyLimits limits;
+              limits.pool_limits.max_connections = 1;
+              limits.pool_limits.max_idle_connections = 1;
+              return limits;
+                 }()),
           server_(context_, ListenConfig{.host = "127.0.0.1", .port = 0},
                   pulsegate::http::RouterConfig{router_}) {
         const auto add = [this](pulsegate::http::HttpMethod method) {
@@ -220,6 +243,7 @@ class ProxyRunningServer {
     }
 
     ~ProxyRunningServer() {
+        proxy_.stop();
         server_.stop();
         if (thread_.joinable()) thread_.join();
     }
@@ -582,7 +606,7 @@ TEST(AsyncHttpServerTest, ServesDefaultAsyncRoutesAndSplitEchoBody) {
 
     const auto version = exchange(
         server, {"GET /api/version HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"});
-    EXPECT_NE(version.find("0.6.0\n"), std::string::npos);
+    EXPECT_NE(version.find("0.7.0\n"), std::string::npos);
 
     const auto echo =
         exchange(server, {"POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Length: 11\r\n",
@@ -636,6 +660,24 @@ TEST(AsyncHttpServerTest, ProxiesCompletePostBodyAndRoundRobinsUpstreams) {
     EXPECT_TRUE(waitUntil([&second] { return second.received(); }));
     EXPECT_TRUE(first.request().ends_with("\r\n\r\nhello world"));
     EXPECT_TRUE(second.request().starts_with("GET /proxy/orders HTTP/1.1\r\n"));
+}
+
+TEST(AsyncHttpServerTest, ReusesAnEligibleUpstreamConnectionAcrossTransactions) {
+    MockUpstream upstream(
+        {"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\nOK"}, 2);
+    const auto endpoint = upstream.endpoint();
+    ProxyRunningServer gateway(
+        {{.host = endpoint.address().to_string(), .service = std::to_string(endpoint.port())}});
+
+    const auto first =
+        exchange(gateway, {"GET /proxy/first HTTP/1.1\r\nHost: demo\r\nConnection: close\r\n\r\n"});
+    const auto second = exchange(
+        gateway, {"GET /proxy/second HTTP/1.1\r\nHost: demo\r\nConnection: close\r\n\r\n"});
+
+    EXPECT_TRUE(first.ends_with("\r\n\r\n2\r\nOK\r\n0\r\n\r\n"));
+    EXPECT_TRUE(second.ends_with("\r\n\r\n2\r\nOK\r\n0\r\n\r\n"));
+    EXPECT_TRUE(waitUntil([&upstream] { return upstream.received(); }));
+    EXPECT_EQ(upstream.connectionCount(), 1U);
 }
 
 TEST(AsyncHttpServerTest, ServesTheSameProtocolWithOneTwoAndFourWorkers) {
