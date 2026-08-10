@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "pulsegate/http/http_server.h"
+#include "pulsegate/http/reverse_proxy.h"
 #include "pulsegate/runtime/asio_runtime.h"
 
 namespace {
@@ -118,6 +119,122 @@ class MultiThreadedRunningServer {
     HttpServer server_;
 };
 
+class MockUpstream {
+   public:
+    explicit MockUpstream(std::vector<std::string> response_fragments)
+        : acceptor_(context_, tcp::endpoint(asio::ip::make_address("127.0.0.1"), 0)),
+          response_fragments_(std::move(response_fragments)) {
+        thread_ = std::jthread([this] {
+            try {
+                tcp::socket socket(context_);
+                acceptor_.accept(socket);
+                std::array<char, 1024> storage{};
+                std::size_t expected_body_bytes = 0;
+                bool headers_complete = false;
+                for (;;) {
+                    const auto count = socket.read_some(asio::buffer(storage));
+                    request_.append(storage.data(), count);
+                    const auto header_end = request_.find("\r\n\r\n");
+                    if (header_end != std::string::npos && !headers_complete) {
+                        const auto content_length = request_.find("Content-Length: ");
+                        if (content_length != std::string::npos && content_length < header_end) {
+                            const auto begin =
+                                content_length + std::string_view("Content-Length: ").size();
+                            const auto end = request_.find("\r\n", begin);
+                            const auto [parsed_end, error] =
+                                std::from_chars(request_.data() + begin, request_.data() + end,
+                                                expected_body_bytes);
+                            if (error != std::errc{} || parsed_end != request_.data() + end) {
+                                throw std::runtime_error(
+                                    "mock upstream received an invalid Content-Length");
+                            }
+                        }
+                        headers_complete = true;
+                    }
+                    if (headers_complete &&
+                        request_.size() >= header_end + 4 + expected_body_bytes) {
+                        break;
+                    }
+                }
+                received_.store(true, std::memory_order_release);
+                for (const auto& fragment : response_fragments_) {
+                    asio::write(socket, asio::buffer(fragment));
+                }
+            } catch (const boost::system::system_error&) {
+            }
+        });
+    }
+
+    MockUpstream(const MockUpstream&) = delete;
+    MockUpstream& operator=(const MockUpstream&) = delete;
+
+    ~MockUpstream() {
+        boost::system::error_code ignored;
+        acceptor_.close(ignored);
+        if (thread_.joinable()) thread_.join();
+    }
+
+    [[nodiscard]] tcp::endpoint endpoint() const {
+        return acceptor_.local_endpoint();
+    }
+    [[nodiscard]] const std::string& request() const {
+        return request_;
+    }
+    [[nodiscard]] bool received() const {
+        return received_.load(std::memory_order_acquire);
+    }
+
+   private:
+    asio::io_context context_{1};
+    tcp::acceptor acceptor_;
+    std::vector<std::string> response_fragments_;
+    std::string request_;
+    std::atomic_bool received_{false};
+    std::jthread thread_;
+};
+
+class ProxyRunningServer {
+   public:
+    explicit ProxyRunningServer(std::vector<pulsegate::http::UpstreamEndpoint> upstreams)
+        : router_(std::make_shared<pulsegate::http::Router>()),
+          proxy_(std::move(upstreams)),
+          server_(context_, ListenConfig{.host = "127.0.0.1", .port = 0},
+                  pulsegate::http::RouterConfig{router_}) {
+        const auto add = [this](pulsegate::http::HttpMethod method) {
+            router_->add(pulsegate::http::Route{
+                .method = method,
+                .pattern = "/proxy/",
+                .name = "proxy",
+                .prefix_match = true,
+                .handler = [proxy = proxy_](pulsegate::http::RequestContext& request_context,
+                                            pulsegate::http::HttpRequest request)
+                    -> pulsegate::net::Awaitable<pulsegate::http::HttpResponse> {
+                    co_return co_await proxy(request_context, std::move(request));
+                }});
+        };
+        add(pulsegate::http::HttpMethod::Get);
+        add(pulsegate::http::HttpMethod::Head);
+        add(pulsegate::http::HttpMethod::Post);
+        server_.start();
+        thread_ = std::jthread([this] { context_.run(); });
+    }
+
+    ~ProxyRunningServer() {
+        server_.stop();
+        if (thread_.joinable()) thread_.join();
+    }
+    [[nodiscard]] tcp::endpoint endpoint() const {
+        return server_.localEndpoint();
+    }
+
+   private:
+    asio::io_context context_{1};
+    std::shared_ptr<pulsegate::http::Router> router_;
+    pulsegate::http::ReverseProxy proxy_;
+    HttpServer server_;
+    std::jthread thread_;
+};
+
 SessionLimits shortTimeoutLimits() {
     SessionLimits limits;
     limits.header_timeout = std::chrono::milliseconds(30);
@@ -150,6 +267,17 @@ class ResponseReader {
 
     std::string readResponse() {
         const auto header_end = waitForHeader();
+        if (pending_.find("Transfer-Encoding: chunked\r\n") < header_end) {
+            for (;;) {
+                const auto marker = pending_.find("0\r\n\r\n", header_end + 4);
+                if (marker != std::string::npos) {
+                    auto response = pending_.substr(0, marker + 5);
+                    pending_.erase(0, marker + 5);
+                    return response;
+                }
+                readMore();
+            }
+        }
         const auto content_length = contentLength(header_end);
         const auto response_size = header_end + 4 + content_length;
         while (pending_.size() < response_size) {
@@ -454,12 +582,60 @@ TEST(AsyncHttpServerTest, ServesDefaultAsyncRoutesAndSplitEchoBody) {
 
     const auto version = exchange(
         server, {"GET /api/version HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"});
-    EXPECT_NE(version.find("0.5.0\n"), std::string::npos);
+    EXPECT_NE(version.find("0.6.0\n"), std::string::npos);
 
     const auto echo =
         exchange(server, {"POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Length: 11\r\n",
                           "Connection: close\r\n\r\nhello ", "world"});
     EXPECT_TRUE(echo.ends_with("\r\n\r\nhello world"));
+}
+
+TEST(AsyncHttpServerTest, ProxiesFragmentedChunkedResponseAndRewritesHeaders) {
+    MockUpstream upstream(
+        {"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: keep-alive\r\n",
+         "X-Upstream: yes\r\n\r\n5\r\nhello\r\n1\r\n!\r\n0\r\n\r\n"});
+    const auto endpoint = upstream.endpoint();
+    ProxyRunningServer gateway({pulsegate::http::UpstreamEndpoint{
+        .host = endpoint.address().to_string(), .service = std::to_string(endpoint.port())}});
+
+    const auto response = exchange(
+        gateway, {"GET /proxy/resource HTTP/1.1\r\nHost: ignored\r\nConnection: close, X-Remove\r\n"
+                  "X-Remove: should-not-pass\r\n\r\n"});
+
+    EXPECT_NE(response.find("HTTP/1.1 200 OK\r\n"), std::string::npos);
+    EXPECT_NE(response.find("Transfer-Encoding: chunked\r\n"), std::string::npos);
+    EXPECT_NE(response.find("x-upstream: yes\r\n"), std::string::npos);
+    EXPECT_EQ(response.find("transfer-encoding:"), std::string::npos);
+    EXPECT_TRUE(response.ends_with("\r\n\r\n6\r\nhello!\r\n0\r\n\r\n"));
+    EXPECT_TRUE(waitUntil([&upstream] { return upstream.received(); }));
+    EXPECT_NE(upstream.request().find("X-Request-Id: "), std::string::npos);
+    EXPECT_NE(upstream.request().find("X-Forwarded-For: 127.0.0.1"), std::string::npos);
+    EXPECT_EQ(upstream.request().find("x-remove:"), std::string::npos);
+}
+
+TEST(AsyncHttpServerTest, ProxiesCompletePostBodyAndRoundRobinsUpstreams) {
+    MockUpstream first({"HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\nA"});
+    MockUpstream second({"HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\nB"});
+    const auto first_endpoint = first.endpoint();
+    const auto second_endpoint = second.endpoint();
+    ProxyRunningServer gateway({{.host = first_endpoint.address().to_string(),
+                                 .service = std::to_string(first_endpoint.port())},
+                                {.host = second_endpoint.address().to_string(),
+                                 .service = std::to_string(second_endpoint.port())}});
+
+    const auto first_response =
+        exchange(gateway, {"POST /proxy/orders HTTP/1.1\r\nHost: demo\r\n"
+                           "Content-Length: 11\r\nConnection: close\r\n\r\nhello ",
+                           "world"});
+    const auto second_response = exchange(
+        gateway, {"GET /proxy/orders HTTP/1.1\r\nHost: demo\r\nConnection: close\r\n\r\n"});
+
+    EXPECT_TRUE(first_response.ends_with("\r\n\r\n1\r\nA\r\n0\r\n\r\n"));
+    EXPECT_TRUE(second_response.ends_with("\r\n\r\n1\r\nB\r\n0\r\n\r\n"));
+    EXPECT_TRUE(waitUntil([&first] { return first.received(); }));
+    EXPECT_TRUE(waitUntil([&second] { return second.received(); }));
+    EXPECT_TRUE(first.request().ends_with("\r\n\r\nhello world"));
+    EXPECT_TRUE(second.request().starts_with("GET /proxy/orders HTTP/1.1\r\n"));
 }
 
 TEST(AsyncHttpServerTest, ServesTheSameProtocolWithOneTwoAndFourWorkers) {

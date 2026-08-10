@@ -2,8 +2,8 @@
 
 PulseGate 是一个用 C++20 和 Boost.Asio 逐步实现的 HTTP 网关学习项目。
 
-当前开发进度是教程第 11 章“异步路由与静态资源”。当前开发版本为 `0.5.0`；最近发布标签
-为第 10 章的 `v0.4.0`。主程序使用一个 `io_context` 和可配置数量的工作线程；每条
+当前开发进度是教程第 12 章“Boost.Asio 协程式反向代理”。当前开发版本为 `0.6.0`；最近发布
+标签为第 11 章的 `v0.5.0`。主程序使用一个 `io_context` 和可配置数量的工作线程；每条
 Session 仍有自己的 strand，因此并发不会让单条连接的状态并行修改。
 
 完整教学见 [PROJECT_TUTORIAL.md](PROJECT_TUTORIAL.md)。
@@ -27,6 +27,8 @@ Session 仍有自己的 strand，因此并发不会让单条连接的状态并�
 - coroutine Router：精确/前缀匹配、405 Allow、请求 ID、异常到 500 的统一边界；
 - `/livez`、`/readyz`、`/metrics`、`/api/version`、`POST /echo`，以及可选静态文件；
 - 有界专用文件线程池，拒绝路径穿越、符号链接逃逸和超限静态文件；
+- `async_resolve` / `async_connect` 协程代理、Round Robin 上游选择和结构化 502/503/504 映射；
+- 上游响应 Parser（Content-Length、chunked、1xx、EOF 边界与上限），以及受控 chunked 下游流式写入；
 - GoogleTest + CTest；
 - Debug、Release、ASan/UBSan、TSan 独立预设；
 - clang-format、clang-tidy 与 GitHub 协作模板。
@@ -93,6 +95,22 @@ curl --noproxy '*' --include http://127.0.0.1:8080/static/index.html
 
 静态文件默认最多 256 KiB；`..`、编码后的 `..`、NUL、反斜杠及逃出 document root 的
 符号链接会被拒绝。文件 I/O 不在 I/O worker 上执行，队列满时返回 503。
+
+启用反向代理时可重复传入上游地址，所有请求到 `/proxy/*` 将按 Round Robin 选择一个上游：
+
+```bash
+python3 tools/mock_upstream.py --port 9001 --name upstream-a
+python3 tools/mock_upstream.py --port 9002 --name upstream-b --chunked
+
+./build/debug/app/pulsegate --listen 127.0.0.1:8080 --threads 4 \
+  --proxy-upstream 127.0.0.1:9001 --proxy-upstream 127.0.0.1:9002
+curl --noproxy '*' --include http://127.0.0.1:8080/proxy/demo
+```
+
+代理会移除 hop-by-hop Header，并重建 `Host`、`X-Forwarded-For`、`X-Forwarded-Proto` 与
+`X-Request-Id`。下游响应在上游 Header 到达后使用 chunked 编码逐块写出；每次写完成前不会
+继续读取下一块上游数据。请求 Body 仍由当前下游 Parser 完整、有上限地读入后才转发；WebSocket
+Upgrade、请求 chunked、重试、健康检查和跨事务上游连接池将在后续章节实现。
 
 第 6 章同步基线仍保留为独立学习程序：
 

@@ -17,12 +17,17 @@
 namespace pulsegate::http {
 
 class HttpSession;
+class ProxySession;
 
 struct RequestContext {
     net::asio::any_io_executor executor;
     std::string request_id;
     net::tcp::endpoint peer;
     std::weak_ptr<HttpSession> downstream;
+    // A proxy handler registers its in-flight transaction here. HttpSession
+    // invokes it only from its own executor when shutdown/close is observed.
+    std::function<void(std::weak_ptr<ProxySession>)> set_current_proxy;
+    std::function<net::Awaitable<bool>(std::string)> write_downstream;
 };
 
 using HttpHandler = std::function<net::Awaitable<HttpResponse>(RequestContext&, HttpRequest)>;

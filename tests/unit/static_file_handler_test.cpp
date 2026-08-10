@@ -44,7 +44,9 @@ HttpResponse invoke(StaticFileHandler& handler, std::string target) {
     RequestContext request_context{.executor = context.get_executor(),
                                    .request_id = "static-request",
                                    .peer = {},
-                                   .downstream = {}};
+                                   .downstream = {},
+                                   .set_current_proxy = {},
+                                   .write_downstream = {}};
     HttpRequest request{.method = HttpMethod::Get,
                         .target = std::move(target),
                         .version_major = 1,

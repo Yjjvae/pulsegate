@@ -50,6 +50,7 @@ class HttpSession : public std::enable_shared_from_this<HttpSession> {
     net::Awaitable<void> run();
     net::Awaitable<std::optional<HttpRequest>> readRequest();
     net::Awaitable<void> writeResponse(const HttpResponse& response, bool head_request);
+    net::Awaitable<bool> writeDownstream(std::string bytes);
     net::Awaitable<void> writeParserError(ParseResult result);
     void armReadDeadline();
     void stopInExecutor(StopReason reason);
@@ -64,6 +65,7 @@ class HttpSession : public std::enable_shared_from_this<HttpSession> {
     std::shared_ptr<SessionRegistry> registry_;
     SessionId id_;
     std::shared_ptr<net::Deadline> deadline_;
+    std::weak_ptr<ProxySession> current_proxy_;
     SessionState state_{SessionState::Created};
     StopReason stop_reason_{StopReason::None};
     bool reading_{false};

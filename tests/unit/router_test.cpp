@@ -24,7 +24,9 @@ HttpResponse invoke(Router& router, HttpRequest request) {
     RequestContext request_context{.executor = context.get_executor(),
                                    .request_id = "test-request",
                                    .peer = {},
-                                   .downstream = {}};
+                                   .downstream = {},
+                                   .set_current_proxy = {},
+                                   .write_downstream = {}};
     auto future = boost::asio::co_spawn(context, router.handle(request_context, std::move(request)),
                                         boost::asio::use_future);
     context.run();

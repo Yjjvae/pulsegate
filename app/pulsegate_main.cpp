@@ -12,9 +12,11 @@
 #include <string_view>
 #include <thread>
 #include <utility>
+#include <vector>
 
 #include "pulsegate/core/version.h"
 #include "pulsegate/http/http_server.h"
+#include "pulsegate/http/reverse_proxy.h"
 #include "pulsegate/http/static_file_handler.h"
 #include "pulsegate/runtime/asio_runtime.h"
 
@@ -58,6 +60,31 @@ pulsegate::net::ListenConfig parseListenAddress(std::string_view value) {
     return config;
 }
 
+pulsegate::http::UpstreamEndpoint parseUpstreamEndpoint(std::string_view value) {
+    std::string_view host;
+    std::string_view service;
+    if (value.starts_with('[')) {
+        const auto closing_bracket = value.find(']');
+        if (closing_bracket == std::string_view::npos || closing_bracket + 1 >= value.size() ||
+            value[closing_bracket + 1] != ':') {
+            throw std::invalid_argument("IPv6 upstream addresses must look like [::1]:8081");
+        }
+        host = value.substr(1, closing_bracket - 1);
+        service = value.substr(closing_bracket + 2);
+    } else {
+        const auto colon = value.rfind(':');
+        if (colon == std::string_view::npos) {
+            throw std::invalid_argument("upstream address must look like HOST:PORT");
+        }
+        host = value.substr(0, colon);
+        service = value.substr(colon + 1);
+    }
+    if (host.empty() || service.empty()) {
+        throw std::invalid_argument("upstream host and port must not be empty");
+    }
+    return {.host = std::string(host), .service = std::string(service)};
+}
+
 std::size_t parseThreadCount(std::string_view value) {
     std::uint32_t count = 0;
     const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), count);
@@ -75,6 +102,7 @@ std::size_t defaultThreadCount() {
 void printUsage(std::ostream& output) {
     output << "PulseGate " << pulsegate::core::version() << '\n'
            << "Usage: pulsegate [--listen HOST:PORT] [--threads N] [--document-root PATH] "
+              "[--proxy-upstream HOST:PORT] "
               "[--help | --version]\n\n"
            << "Multi-threaded Boost.Asio coroutine HTTP server.\n"
            << "Example: pulsegate --listen 127.0.0.1:8080 --threads 4\n";
@@ -87,6 +115,7 @@ int main(int argc, char* argv[]) {
         pulsegate::net::ListenConfig config;
         std::size_t thread_count = defaultThreadCount();
         std::optional<std::filesystem::path> document_root;
+        std::vector<pulsegate::http::UpstreamEndpoint> proxy_upstreams;
         for (int index = 1; index < argc; ++index) {
             const std::string_view argument(argv[index]);
             if (argument == "--version") {
@@ -113,6 +142,10 @@ int main(int argc, char* argv[]) {
                 document_root = argv[++index];
                 continue;
             }
+            if (argument == "--proxy-upstream" && index + 1 < argc) {
+                proxy_upstreams.push_back(parseUpstreamEndpoint(argv[++index]));
+                continue;
+            }
             throw std::invalid_argument("unknown or incomplete argument: " + std::string(argument));
         }
 
@@ -135,6 +168,26 @@ int main(int argc, char* argv[]) {
             };
             add_static(pulsegate::http::HttpMethod::Get);
             add_static(pulsegate::http::HttpMethod::Head);
+        }
+        if (!proxy_upstreams.empty()) {
+            pulsegate::http::ReverseProxy proxy(std::move(proxy_upstreams));
+            const auto add_proxy = [&router, proxy](pulsegate::http::HttpMethod method) {
+                router->add(pulsegate::http::Route{
+                    .method = method,
+                    .pattern = "/proxy/",
+                    .name = "reverse_proxy",
+                    .prefix_match = true,
+                    .handler = [proxy](pulsegate::http::RequestContext& context,
+                                       pulsegate::http::HttpRequest request)
+                        -> pulsegate::net::Awaitable<pulsegate::http::HttpResponse> {
+                        co_return co_await proxy(context, std::move(request));
+                    }});
+            };
+            add_proxy(pulsegate::http::HttpMethod::Get);
+            add_proxy(pulsegate::http::HttpMethod::Head);
+            add_proxy(pulsegate::http::HttpMethod::Post);
+            add_proxy(pulsegate::http::HttpMethod::Put);
+            add_proxy(pulsegate::http::HttpMethod::Delete);
         }
         pulsegate::http::HttpServer server(runtime.context(), config,
                                            pulsegate::http::RouterConfig{std::move(router)});

@@ -241,3 +241,40 @@ curl --noproxy '*' --path-as-is --include http://127.0.0.1:8080/static/%2e%2e/se
 
 `curl` 默认会在请求发送前规范化部分路径；验证编码 `..` 时必须使用 `--path-as-is`，否则
 服务端看到的是已变成 `/secret` 的路径，得到 404 并不能证明 traversal 防护生效。
+
+## 阶段 6：协程式反向代理验收
+
+```bash
+cmake --preset debug
+cmake --build --preset debug
+ctest --preset debug --output-on-failure
+
+ctest --test-dir build/debug \
+  -R 'HttpResponseParserTest|ReverseProxyTest|AsyncHttpServerTest.Proxies' \
+  --output-on-failure
+```
+
+手工启动两个可观察 request ID 的 mock upstream：
+
+```bash
+python3 tools/mock_upstream.py --port 9001 --name upstream-a
+python3 tools/mock_upstream.py --port 9002 --name upstream-b --chunked
+
+./build/debug/app/pulsegate --listen 127.0.0.1:8080 --threads 4 \
+  --proxy-upstream 127.0.0.1:9001 --proxy-upstream 127.0.0.1:9002
+curl --noproxy '*' --include http://127.0.0.1:8080/proxy/orders
+curl --noproxy '*' --include -X POST --data-binary 'hello proxy' \
+  http://127.0.0.1:8080/proxy/orders
+```
+
+预期结果：
+
+- 两个连续请求在两个上游之间 Round Robin；上游日志可看到 `X-Request-Id`；
+- 代理使用异步 DNS、连接、读写与 deadline；不会在 `io_context` worker 做同步 DNS/connect；
+- 上游 `Content-Length`、chunked、1xx、无 Body 状态和 EOF 形式的响应边界均由
+  `HttpResponseParser` 处理或拒绝；Header/Body 有上限；
+- 上游 Header 到达后，响应以 chunked 写给下游；每块 `async_write` 完成前不继续读取上游，
+  形成有界背压；一旦已经写出 Header，后续上游失败只关闭下游，不拼接 HTTP 错误页；
+- `Connection`、`Keep-Alive`、`TE`、`Trailer`、`Transfer-Encoding`、`Upgrade` 以及
+  `Connection` 点名字段不会被转发；网关重建 `Host`、转发链与 request ID；
+- WebSocket Upgrade 返回 501；请求 chunked、自动重试、主动健康检查和跨事务连接池不属于本阶段。
