@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <exception>
 #include <stdexcept>
+#include <string>
 #include <utility>
 
 namespace pulsegate::http {
@@ -30,9 +31,13 @@ std::string methodName(HttpMethod method) {
 
 }  // namespace
 
-Router::Router() : routes_(std::make_shared<const Routes>()) {}
+Router::Router(std::optional<RateLimitConfig> global_rate_limit)
+    : routes_(std::make_shared<const Routes>()),
+      route_limiters_(std::make_shared<const RouteLimiters>()) {
+    if (global_rate_limit) global_limiter_ = std::make_shared<RateLimiter>(*global_rate_limit);
+}
 
-void Router::add(Route route) {
+void Router::add(Route route, std::optional<RateLimitConfig> rate_limit) {
     if (route.pattern.empty() || route.pattern.front() != '/' || route.name.empty() ||
         !route.handler) {
         throw std::invalid_argument("route requires an absolute pattern, name, and handler");
@@ -40,8 +45,13 @@ void Router::add(Route route) {
     std::scoped_lock lock(update_mutex_);
     auto current = routes_.load(std::memory_order_acquire);
     auto updated = std::make_shared<Routes>(*current);
+    auto current_limiters = route_limiters_.load(std::memory_order_acquire);
+    auto updated_limiters = std::make_shared<RouteLimiters>(*current_limiters);
+    if (rate_limit) (*updated_limiters)[route.name] = std::make_shared<RateLimiter>(*rate_limit);
     updated->push_back(std::move(route));
     routes_.store(std::const_pointer_cast<const Routes>(updated), std::memory_order_release);
+    route_limiters_.store(std::const_pointer_cast<const RouteLimiters>(updated_limiters),
+                          std::memory_order_release);
 }
 
 std::optional<Route> Router::match(HttpMethod method, std::string_view target) const {
@@ -57,6 +67,14 @@ std::optional<Route> Router::match(HttpMethod method, std::string_view target) c
 }
 
 net::Awaitable<HttpResponse> Router::handle(RequestContext& context, HttpRequest request) const {
+    if (global_limiter_) {
+        const auto decision = global_limiter_->check(clientKey(context));
+        if (!decision.allowed) {
+            auto response = makeRateLimited(decision);
+            response.headers.set("X-Request-Id", context.request_id);
+            co_return response;
+        }
+    }
     const auto path = pathPart(request.target);
     const auto snapshot = routes_.load(std::memory_order_acquire);
     const auto iterator = std::find_if(
@@ -82,10 +100,22 @@ net::Awaitable<HttpResponse> Router::handle(RequestContext& context, HttpRequest
             response.headers.add("Allow", allow);
         }
     } else {
-        try {
-            response = co_await iterator->handler(context, std::move(request));
-        } catch (...) {
-            response = makeError(500, "Internal Server Error", "internal server error\n");
+        const auto route_limiters = route_limiters_.load(std::memory_order_acquire);
+        const auto limiter = route_limiters->find(iterator->name);
+        bool allowed = true;
+        std::optional<RateLimitDecision> decision;
+        if (limiter != route_limiters->end()) {
+            decision = limiter->second->check(clientKey(context));
+            allowed = decision->allowed;
+        }
+        if (!allowed) {
+            response = makeRateLimited(*decision);
+        } else {
+            try {
+                response = co_await iterator->handler(context, std::move(request));
+            } catch (...) {
+                response = makeError(500, "Internal Server Error", "internal server error\n");
+            }
         }
     }
     response.headers.set("X-Request-Id", context.request_id);
@@ -94,6 +124,40 @@ net::Awaitable<HttpResponse> Router::handle(RequestContext& context, HttpRequest
 
 std::string Router::nextRequestId() {
     return std::to_string(next_request_id_.fetch_add(1, std::memory_order_relaxed));
+}
+
+std::string Router::rateLimitMetrics() const {
+    const auto append = [](std::string& output, std::string_view scope,
+                           const RateLimitStats& stats) {
+        const auto add = [&output, scope](std::string_view outcome, std::uint64_t value) {
+            output.append("pulsegate_rate_limit_requests_total{scope=\"");
+            output.append(scope);
+            output.append("\",outcome=\"");
+            output.append(outcome);
+            output.append("\"} ");
+            output.append(std::to_string(value));
+            output.push_back('\n');
+        };
+        add("allowed", stats.allowed);
+        add("rejected", stats.rejected);
+        add("key_capacity", stats.rejected_key_capacity);
+    };
+
+    std::string output;
+    output.append("# TYPE pulsegate_rate_limit_requests_total counter\n");
+    if (global_limiter_) append(output, "global", global_limiter_->stats());
+
+    RateLimitStats routes;
+    const auto route_limiters = route_limiters_.load(std::memory_order_acquire);
+    for (const auto& [name, limiter] : *route_limiters) {
+        static_cast<void>(name);
+        const auto stats = limiter->stats();
+        routes.allowed += stats.allowed;
+        routes.rejected += stats.rejected;
+        routes.rejected_key_capacity += stats.rejected_key_capacity;
+    }
+    if (!route_limiters->empty()) append(output, "route", routes);
+    return output;
 }
 
 std::string_view Router::pathPart(std::string_view target) noexcept {
@@ -115,6 +179,18 @@ HttpResponse Router::makeError(int status_code, std::string reason, std::string 
     response.body = std::move(body);
     response.headers.add("Content-Type", "text/plain");
     return response;
+}
+
+HttpResponse Router::makeRateLimited(const RateLimitDecision& decision) {
+    auto response = makeError(429, "Too Many Requests", "rate limit exceeded\n");
+    const auto milliseconds = decision.retry_after.count();
+    const auto seconds = std::max<decltype(milliseconds)>(1, (milliseconds + 999) / 1000);
+    response.headers.add("Retry-After", std::to_string(seconds));
+    return response;
+}
+
+std::string Router::clientKey(const RequestContext& context) {
+    return context.peer.address().is_unspecified() ? "unknown" : context.peer.address().to_string();
 }
 
 }  // namespace pulsegate::http

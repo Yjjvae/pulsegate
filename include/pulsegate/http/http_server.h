@@ -85,7 +85,8 @@ class HttpServer {
     [[nodiscard]] net::tcp::endpoint localEndpoint() const;
     [[nodiscard]] std::size_t connectionCount() const;
     [[nodiscard]] std::size_t closedCount(StopReason reason) const;
-    [[nodiscard]] static std::shared_ptr<Router> makeDefaultRouter();
+    [[nodiscard]] static std::shared_ptr<Router> makeDefaultRouter(
+        std::optional<RateLimitConfig> global_rate_limit = std::nullopt);
 
    private:
     std::shared_ptr<net::Listener> listener_;

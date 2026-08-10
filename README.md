@@ -2,8 +2,8 @@
 
 PulseGate 是一个用 C++20 和 Boost.Asio 逐步实现的 HTTP 网关学习项目。
 
-当前开发进度是教程第 13 章“主动健康检查与上游连接池”。当前开发版本为 `0.7.0`；最近发布
-标签为 `v0.6.0`。主程序使用一个 `io_context` 和可配置数量的工作线程；每条
+当前开发进度是教程第 14 章“Token Bucket 限流”。当前开发版本为 `0.8.0`；最近发布
+标签为 `v0.7.0`。主程序使用一个 `io_context` 和可配置数量的工作线程；每条
 Session 仍有自己的 strand，因此并发不会让单条连接的状态并行修改。
 
 完整教学见 [PROJECT_TUTORIAL.md](PROJECT_TUTORIAL.md)。
@@ -29,6 +29,7 @@ Session 仍有自己的 strand，因此并发不会让单条连接的状态并�
 - 有界专用文件线程池，拒绝路径穿越、符号链接逃逸和超限静态文件；
 - `async_resolve` / `async_connect` 协程代理、Round Robin 上游选择和结构化 502/503/504 映射；
 - 上游响应 Parser（Content-Length、chunked、1xx、EOF 边界与上限），以及受控 chunked 下游流式写入；
+- Token Bucket 全局/路由限流：支持按客户端 IP 分桶、分片 TTL 清理、最大 key 数、429/Retry-After 与聚合拒绝指标；
 - GoogleTest + CTest；
 - Debug、Release、ASan/UBSan、TSan 独立预设；
 - clang-format、clang-tidy 与 GitHub 协作模板。
@@ -127,6 +128,22 @@ curl --noproxy '*' http://127.0.0.1:8080/proxy/two
 ```
 
 mock 输出中两条业务请求应具有同一个 `connection=N`；健康检查会额外建立独立连接，这是预期行为。
+
+启用全局限流时，`--rate-limit` 和 `--rate-burst` 必须成对给出；添加
+`--rate-per-client` 后按 TCP 对端 IP 分桶。网关不会直接信任客户端可伪造的
+`X-Forwarded-For`。`/proxy/*` 也可单独使用 `--proxy-rate-limit`、`--proxy-rate-burst`
+与 `--proxy-rate-per-client`，在建立上游连接前拒绝超额请求：
+
+```bash
+./build/debug/app/pulsegate --listen 127.0.0.1:8080 --threads 4 \
+  --rate-limit 100 --rate-burst 200 --rate-per-client \
+  --proxy-upstream 127.0.0.1:9001 \
+  --proxy-rate-limit 20 --proxy-rate-burst 40 --proxy-rate-per-client
+```
+
+超额请求返回 `429 Too Many Requests` 和向上取整的 `Retry-After` 秒数。`/metrics`
+额外输出 `pulsegate_rate_limit_requests_total`，仅以 `scope`（global/route）和
+`outcome`（allowed/rejected/key_capacity）聚合，绝不把 IP 用作标签。
 
 第 6 章同步基线仍保留为独立学习程序：
 

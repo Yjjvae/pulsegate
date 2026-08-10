@@ -87,6 +87,7 @@ target_sources(
     http/http_response.cpp
     http/http_response_parser.cpp
     http/http_server.cpp
+    http/rate_limiter.cpp
     http/router.cpp
     http/reverse_proxy.cpp
     http/static_file_handler.cpp

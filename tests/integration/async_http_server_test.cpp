@@ -11,6 +11,7 @@
 #include <charconv>
 #include <chrono>
 #include <cstddef>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -212,28 +213,32 @@ class MockUpstream {
 
 class ProxyRunningServer {
    public:
-    explicit ProxyRunningServer(std::vector<pulsegate::http::UpstreamEndpoint> upstreams)
+    explicit ProxyRunningServer(
+        std::vector<pulsegate::http::UpstreamEndpoint> upstreams,
+        std::optional<pulsegate::http::RateLimitConfig> rate_limit = std::nullopt)
         : router_(std::make_shared<pulsegate::http::Router>()),
           proxy_(std::move(upstreams),
                  [] {
-              pulsegate::http::ProxyLimits limits;
-              limits.pool_limits.max_connections = 1;
-              limits.pool_limits.max_idle_connections = 1;
-              return limits;
+                     pulsegate::http::ProxyLimits limits;
+                     limits.pool_limits.max_connections = 1;
+                     limits.pool_limits.max_idle_connections = 1;
+                     return limits;
                  }()),
           server_(context_, ListenConfig{.host = "127.0.0.1", .port = 0},
                   pulsegate::http::RouterConfig{router_}) {
-        const auto add = [this](pulsegate::http::HttpMethod method) {
-            router_->add(pulsegate::http::Route{
-                .method = method,
-                .pattern = "/proxy/",
-                .name = "proxy",
-                .prefix_match = true,
-                .handler = [proxy = proxy_](pulsegate::http::RequestContext& request_context,
-                                            pulsegate::http::HttpRequest request)
-                    -> pulsegate::net::Awaitable<pulsegate::http::HttpResponse> {
-                    co_return co_await proxy(request_context, std::move(request));
-                }});
+        const auto add = [this, rate_limit](pulsegate::http::HttpMethod method) {
+            router_->add(
+                pulsegate::http::Route{
+                    .method = method,
+                    .pattern = "/proxy/",
+                    .name = "proxy",
+                    .prefix_match = true,
+                    .handler = [proxy = proxy_](pulsegate::http::RequestContext& request_context,
+                                                pulsegate::http::HttpRequest request)
+                        -> pulsegate::net::Awaitable<pulsegate::http::HttpResponse> {
+                        co_return co_await proxy(request_context, std::move(request));
+                    }},
+                rate_limit);
         };
         add(pulsegate::http::HttpMethod::Get);
         add(pulsegate::http::HttpMethod::Head);
@@ -606,7 +611,14 @@ TEST(AsyncHttpServerTest, ServesDefaultAsyncRoutesAndSplitEchoBody) {
 
     const auto version = exchange(
         server, {"GET /api/version HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"});
-    EXPECT_NE(version.find("0.7.0\n"), std::string::npos);
+    EXPECT_NE(version.find("0.8.0\n"), std::string::npos);
+
+    const auto metrics =
+        exchange(server, {"GET /metrics HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"});
+    EXPECT_NE(metrics.find("\r\n\r\npulsegate_ready 1\n"), std::string::npos);
+    EXPECT_NE(metrics.find("# TYPE pulsegate_rate_limit_requests_total counter\n"),
+              std::string::npos);
+    EXPECT_NE(metrics.find("content-type: text/plain; version=0.0.4\r\n"), std::string::npos);
 
     const auto echo =
         exchange(server, {"POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Length: 11\r\n",
@@ -678,6 +690,30 @@ TEST(AsyncHttpServerTest, ReusesAnEligibleUpstreamConnectionAcrossTransactions) 
     EXPECT_TRUE(second.ends_with("\r\n\r\n2\r\nOK\r\n0\r\n\r\n"));
     EXPECT_TRUE(waitUntil([&upstream] { return upstream.received(); }));
     EXPECT_EQ(upstream.connectionCount(), 1U);
+}
+
+TEST(AsyncHttpServerTest, RateLimitRejectsBeforeASecondProxyRequestReachesUpstream) {
+    MockUpstream upstream({"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK"});
+    const auto endpoint = upstream.endpoint();
+    ProxyRunningServer gateway(
+        {{.host = endpoint.address().to_string(), .service = std::to_string(endpoint.port())}},
+        pulsegate::http::RateLimitConfig{.requests_per_second = 1.0,
+                                         .burst = 1.0,
+                                         .per_client = true,
+                                         .shard_count = 2,
+                                         .max_keys = 8,
+                                         .idle_ttl = std::chrono::seconds(1)});
+
+    const auto first =
+        exchange(gateway, {"GET /proxy/first HTTP/1.1\r\nHost: demo\r\nConnection: close\r\n\r\n"});
+    const auto rejected = exchange(
+        gateway, {"GET /proxy/second HTTP/1.1\r\nHost: demo\r\nConnection: close\r\n\r\n"});
+
+    EXPECT_TRUE(first.ends_with("\r\n\r\n2\r\nOK\r\n0\r\n\r\n"));
+    EXPECT_NE(rejected.find("HTTP/1.1 429 Too Many Requests\r\n"), std::string::npos);
+    EXPECT_NE(rejected.find("retry-after: 1\r\n"), std::string::npos);
+    EXPECT_TRUE(waitUntil([&upstream] { return upstream.received(); }));
+    EXPECT_EQ(upstream.request().find("GET /proxy/second"), std::string::npos);
 }
 
 TEST(AsyncHttpServerTest, ServesTheSameProtocolWithOneTwoAndFourWorkers) {

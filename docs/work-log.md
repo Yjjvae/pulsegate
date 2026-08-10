@@ -509,6 +509,46 @@
 - 在允许网络 socket 的 CI/本机补充两次真实代理请求复用同一连接、Probe 恢复以及多 worker/TSan 验证；
 - 代理 CLI 暂未暴露健康阈值和 pool 上限配置，当前采用代码默认值。
 
+## 2026-08-10
+
+### 第十四章：Token Bucket 限流
+
+完成内容：
+
+- 新增线程安全的 `TokenBucket`：初始 burst 满额、按 `steady_clock` 补充令牌，并提供
+  `Retry-After` 所需的等待时间；构造及调用参数均拒绝非有限或非正值；
+- 新增 `RateLimiter`：既可作为一个全局 Bucket，也可按 TCP 对端 IP 建立分片 Bucket 表；
+  表在分片锁内 TTL 清理，并用原子 key 计数严格限制总 key 数，达到容量上限时快速拒绝；
+- `Router` 在匹配 handler 前执行全局和可选路由级限流。拒绝返回 429、`Retry-After` 和
+  `X-Request-Id`，因此不会创建上游代理连接；允许的限流路由仍保持原有 handler 异常到 500 的边界；
+- 主程序新增 `--rate-limit/--rate-burst/--rate-per-client` 全局参数，以及
+  `--proxy-rate-limit/--proxy-rate-burst/--proxy-rate-per-client` 的 `/proxy/*` 路由参数；
+- `/metrics` 增加 `pulsegate_rate_limit_requests_total`，只用 global/route 与
+  allowed/rejected/key_capacity 聚合，未将客户端 IP 作为 Prometheus 标签；
+- 开发版本升级到 `0.8.0`。
+
+验证结果：
+
+- Token Bucket 的 burst、补充、并发不超发与非法参数均由 FakeClock/单元测试覆盖；
+- 覆盖客户端 Bucket TTL、key 容量上限、统计聚合、全局/路由限流、允许路由的异常映射；
+- 回环代理集成测试确认第二个被拒绝的 `/proxy/*` 请求不会到达 Mock Upstream；
+- Debug、ASan/UBSan、TSan 完整 CTest 均为 **98/98 通过**；`-Werror` 与 Release 构建通过，
+  Release `--version` 输出 `0.8.0`；
+- CLI 帮助包含全局和 `/proxy/*` 限流选项；缺少配对的 burst 参数会以非零退出并给出明确错误。
+
+重要决策：
+
+- 客户端维度以 socket peer IP 为 key；除非日后引入受信任代理链配置，否则不读取
+  `X-Forwarded-For`；
+- 最大 key 数耗尽是显式的过载拒绝（429），而不是无界分配或静默退化为全局 Bucket；
+- 指标只记录聚合结果，不引入会导致高基数的客户端标签。
+
+遗留事项：
+
+- 下一小节实现分片 LRU + TTL 响应缓存；缓存命中与限流顺序需要在设计时明确；
+- 当前 CLI 暴露速率、burst 和客户端维度；分片数、TTL、最大 key 数保留为 API 安全默认值，
+  后续如需运行时配置应同时补充上限校验和运维文档。
+
 ## 后续记录模板
 
 ```markdown

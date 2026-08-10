@@ -1,6 +1,7 @@
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/signal_set.hpp>
 #include <charconv>
+#include <cmath>
 #include <cstdint>
 #include <exception>
 #include <filesystem>
@@ -100,10 +101,26 @@ std::size_t defaultThreadCount() {
     return detected == 0 ? 1U : static_cast<std::size_t>(detected);
 }
 
+double parsePositiveDouble(std::string_view value, std::string_view option) {
+    std::size_t consumed = 0;
+    double parsed = 0.0;
+    try {
+        parsed = std::stod(std::string(value), &consumed);
+    } catch (const std::exception&) {
+        throw std::invalid_argument(std::string(option) + " must be a positive number");
+    }
+    if (consumed != value.size() || !std::isfinite(parsed) || parsed <= 0.0) {
+        throw std::invalid_argument(std::string(option) + " must be a positive number");
+    }
+    return parsed;
+}
+
 void printUsage(std::ostream& output) {
     output << "PulseGate " << pulsegate::core::version() << '\n'
            << "Usage: pulsegate [--listen HOST:PORT] [--threads N] [--document-root PATH] "
               "[--proxy-upstream HOST:PORT] "
+              "[--rate-limit RPS --rate-burst N [--rate-per-client]] "
+              "[--proxy-rate-limit RPS --proxy-rate-burst N [--proxy-rate-per-client]] "
               "[--help | --version]\n\n"
            << "Multi-threaded Boost.Asio coroutine HTTP server.\n"
            << "Example: pulsegate --listen 127.0.0.1:8080 --threads 4\n";
@@ -117,6 +134,12 @@ int main(int argc, char* argv[]) {
         std::size_t thread_count = defaultThreadCount();
         std::optional<std::filesystem::path> document_root;
         std::vector<pulsegate::http::UpstreamEndpoint> proxy_upstreams;
+        std::optional<double> rate_limit;
+        std::optional<double> rate_burst;
+        bool rate_per_client = false;
+        std::optional<double> proxy_rate_limit;
+        std::optional<double> proxy_rate_burst;
+        bool proxy_rate_per_client = false;
         std::vector<std::shared_ptr<pulsegate::http::HealthChecker>> health_checkers;
         std::vector<pulsegate::http::ReverseProxy> reverse_proxies;
         for (int index = 1; index < argc; ++index) {
@@ -149,11 +172,56 @@ int main(int argc, char* argv[]) {
                 proxy_upstreams.push_back(parseUpstreamEndpoint(argv[++index]));
                 continue;
             }
+            if (argument == "--rate-limit" && index + 1 < argc) {
+                rate_limit = parsePositiveDouble(argv[++index], "--rate-limit");
+                continue;
+            }
+            if (argument == "--rate-burst" && index + 1 < argc) {
+                rate_burst = parsePositiveDouble(argv[++index], "--rate-burst");
+                continue;
+            }
+            if (argument == "--rate-per-client") {
+                rate_per_client = true;
+                continue;
+            }
+            if (argument == "--proxy-rate-limit" && index + 1 < argc) {
+                proxy_rate_limit = parsePositiveDouble(argv[++index], "--proxy-rate-limit");
+                continue;
+            }
+            if (argument == "--proxy-rate-burst" && index + 1 < argc) {
+                proxy_rate_burst = parsePositiveDouble(argv[++index], "--proxy-rate-burst");
+                continue;
+            }
+            if (argument == "--proxy-rate-per-client") {
+                proxy_rate_per_client = true;
+                continue;
+            }
             throw std::invalid_argument("unknown or incomplete argument: " + std::string(argument));
         }
 
+        if (rate_limit.has_value() != rate_burst.has_value()) {
+            throw std::invalid_argument("--rate-limit and --rate-burst must be used together");
+        }
+        if (proxy_rate_limit.has_value() != proxy_rate_burst.has_value()) {
+            throw std::invalid_argument(
+                "--proxy-rate-limit and --proxy-rate-burst must be used together");
+        }
+        std::optional<pulsegate::http::RateLimitConfig> global_rate_limit;
+        if (rate_limit) {
+            global_rate_limit = pulsegate::http::RateLimitConfig{.requests_per_second = *rate_limit,
+                                                                 .burst = *rate_burst,
+                                                                 .per_client = rate_per_client};
+        }
+        std::optional<pulsegate::http::RateLimitConfig> proxy_route_limit;
+        if (proxy_rate_limit) {
+            proxy_route_limit =
+                pulsegate::http::RateLimitConfig{.requests_per_second = *proxy_rate_limit,
+                                                 .burst = *proxy_rate_burst,
+                                                 .per_client = proxy_rate_per_client};
+        }
+
         pulsegate::runtime::AsioRuntime runtime(thread_count);
-        auto router = pulsegate::http::HttpServer::makeDefaultRouter();
+        auto router = pulsegate::http::HttpServer::makeDefaultRouter(global_rate_limit);
         if (document_root) {
             auto files = std::make_shared<pulsegate::http::BoundedFileService>(*document_root);
             pulsegate::http::StaticFileHandler static_files(*document_root, files);
@@ -181,17 +249,20 @@ int main(int argc, char* argv[]) {
             checker->start();
             health_checkers.push_back(std::move(checker));
             reverse_proxies.push_back(proxy);
-            const auto add_proxy = [&router, proxy](pulsegate::http::HttpMethod method) {
-                router->add(pulsegate::http::Route{
-                    .method = method,
-                    .pattern = "/proxy/",
-                    .name = "reverse_proxy",
-                    .prefix_match = true,
-                    .handler = [proxy](pulsegate::http::RequestContext& context,
-                                       pulsegate::http::HttpRequest request)
-                        -> pulsegate::net::Awaitable<pulsegate::http::HttpResponse> {
-                        co_return co_await proxy(context, std::move(request));
-                    }});
+            const auto add_proxy = [&router, proxy,
+                                    proxy_route_limit](pulsegate::http::HttpMethod method) {
+                router->add(
+                    pulsegate::http::Route{
+                        .method = method,
+                        .pattern = "/proxy/",
+                        .name = "reverse_proxy",
+                        .prefix_match = true,
+                        .handler = [proxy](pulsegate::http::RequestContext& context,
+                                           pulsegate::http::HttpRequest request)
+                            -> pulsegate::net::Awaitable<pulsegate::http::HttpResponse> {
+                            co_return co_await proxy(context, std::move(request));
+                        }},
+                    proxy_route_limit);
             };
             add_proxy(pulsegate::http::HttpMethod::Get);
             add_proxy(pulsegate::http::HttpMethod::Head);

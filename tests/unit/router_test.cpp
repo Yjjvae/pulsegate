@@ -15,6 +15,7 @@ using namespace std::chrono_literals;
 using pulsegate::http::HttpMethod;
 using pulsegate::http::HttpRequest;
 using pulsegate::http::HttpResponse;
+using pulsegate::http::RateLimitConfig;
 using pulsegate::http::RequestContext;
 using pulsegate::http::Route;
 using pulsegate::http::Router;
@@ -127,6 +128,77 @@ TEST(RouterTest, AwaitsHandlerAndMapsExceptionToInternalServerError) {
                                              .body = {}});
     EXPECT_EQ(failed.status_code, 500);
     EXPECT_EQ(failed.headers.get("x-request-id"), "test-request");
+}
+
+TEST(RouterTest, RejectsBeforeInvokingARouteHandlerWhenRouteLimitIsExhausted) {
+    Router router;
+    int calls = 0;
+    router.add(Route{.method = HttpMethod::Get,
+                     .pattern = "/limited",
+                     .name = "limited",
+                     .handler = [&calls](RequestContext&,
+                                         HttpRequest) -> pulsegate::net::Awaitable<HttpResponse> {
+                         ++calls;
+                         co_return HttpResponse{};
+                     }},
+               RateLimitConfig{.requests_per_second = 1.0,
+                               .burst = 1.0,
+                               .per_client = true,
+                               .shard_count = 2,
+                               .max_keys = 8,
+                               .idle_ttl = std::chrono::seconds(1)});
+
+    const HttpRequest request{.method = HttpMethod::Get,
+                              .target = "/limited",
+                              .version_major = 1,
+                              .version_minor = 1,
+                              .headers = {},
+                              .body = {}};
+    EXPECT_EQ(invoke(router, request).status_code, 200);
+    const auto rejected = invoke(router, request);
+    EXPECT_EQ(rejected.status_code, 429);
+    EXPECT_EQ(rejected.headers.get("retry-after"), "1");
+    EXPECT_EQ(rejected.headers.get("x-request-id"), "test-request");
+    EXPECT_EQ(calls, 1);
+}
+
+TEST(RouterTest, PreservesExceptionMappingForAnAllowedRateLimitedRoute) {
+    Router router;
+    router.add(Route{.method = HttpMethod::Get,
+                     .pattern = "/limited-throws",
+                     .name = "limited-throws",
+                     .handler = [](RequestContext&,
+                                   HttpRequest) -> pulsegate::net::Awaitable<HttpResponse> {
+                         throw std::runtime_error("handler failure");
+                         co_return HttpResponse{};
+                     }},
+               RateLimitConfig{.requests_per_second = 1.0, .burst = 1.0, .per_client = false});
+
+    const auto response = invoke(router, HttpRequest{.method = HttpMethod::Get,
+                                                     .target = "/limited-throws",
+                                                     .version_major = 1,
+                                                     .version_minor = 1,
+                                                     .headers = {},
+                                                     .body = {}});
+    EXPECT_EQ(response.status_code, 500);
+    EXPECT_EQ(response.headers.get("x-request-id"), "test-request");
+}
+
+TEST(RouterTest, AppliesAGlobalLimitBeforeRouteLookup) {
+    Router router(RateLimitConfig{.requests_per_second = 1.0, .burst = 1.0, .per_client = false});
+    const HttpRequest request{.method = HttpMethod::Get,
+                              .target = "/not-configured",
+                              .version_major = 1,
+                              .version_minor = 1,
+                              .headers = {},
+                              .body = {}};
+
+    EXPECT_EQ(invoke(router, request).status_code, 404);
+    const auto rejected = invoke(router, request);
+    EXPECT_EQ(rejected.status_code, 429);
+    EXPECT_EQ(rejected.headers.get("retry-after"), "1");
+    EXPECT_NE(router.rateLimitMetrics().find("scope=\"global\",outcome=\"rejected\"} 1"),
+              std::string::npos);
 }
 
 }  // namespace
