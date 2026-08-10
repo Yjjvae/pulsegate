@@ -2,8 +2,9 @@
 
 PulseGate 是一个用 C++20 和 Boost.Asio 逐步实现的 HTTP 网关学习项目。
 
-当前开发进度是教程第 6 章“Boost.Asio 同步 TCP/HTTP 基线”；最近一个发布标签
-仍是阶段 0 的 `v0.0.1`。同步版本用于建立正确性基线，不代表最终并发架构。
+当前开发进度是教程第 8 章“单线程 Boost.Asio 协程服务器”；最近一个发布标签
+是同步基线的 `v0.1.0`。当前主程序能在一个 `io_context` 线程上管理多个连接，
+但这仍是异步正确性基线，不是多线程性能版本。
 
 完整教学见 [PROJECT_TUTORIAL.md](PROJECT_TUTORIAL.md)。
 
@@ -15,8 +16,10 @@ PulseGate 是一个用 C++20 和 Boost.Asio 逐步实现的 HTTP 网关学习项
 - GCC/Clang 高等级编译警告；
 - Boost.Asio 与 header-only Boost.System 依赖边界；
 - 基于 Boost.Asio 的同步 TCP accept/read/write 闭环；
-- 最小 GET 请求行校验，以及 200、400、405、431 响应；
-- 16 KiB 请求头上限与单连接错误隔离；
+- 带读写下标和绝对上限的 Asio-friendly 字节 Buffer；
+- 支持分段输入、`Content-Length`、Keep-Alive 与顺序 Pipelining 的 HTTP/1.1 解析器；
+- 安全 Header 处理、响应序列化，以及 400、405、413、431、501 错误映射；
+- 单线程 C++20 Coroutine Listener/Session，慢客户端不会阻塞其他连接；
 - GoogleTest + CTest；
 - Debug、Release、ASan/UBSan、TSan 独立预设；
 - clang-format、clang-tidy 与 GitHub 协作模板。
@@ -55,7 +58,22 @@ ctest --preset debug
 ./build/debug/app/pulsegate --help
 ```
 
-启动第 6 章同步基线：
+启动当前异步服务器：
+
+```bash
+./build/debug/app/pulsegate --listen 127.0.0.1:8080
+```
+
+另开一个终端验证健康检查：
+
+```bash
+curl --noproxy '*' --include http://127.0.0.1:8080/healthz
+```
+
+预期 Body 为 `ok`。当前支持 HTTP/1.0、HTTP/1.1、`Content-Length`、Keep-Alive 和
+顺序处理的 Pipelining；暂不支持 chunked 请求、超时或多线程 I/O。
+
+第 6 章同步基线仍保留为独立学习程序：
 
 ```bash
 ./build/debug/app/pulsegate_sync_baseline --listen 127.0.0.1:8080
@@ -68,8 +86,7 @@ ctest --preset debug
 curl --noproxy '*' --include http://127.0.0.1:8080/health
 ```
 
-预期 Body 为 `hello world`。当前服务器有意一次只处理一条连接；并发处理将在后续
-异步章节实现。
+预期 Body 为 `hello world`。它有意一次只处理一条连接，方便与当前异步实现对照。
 
 Release 构建：
 
@@ -98,8 +115,10 @@ ctest --preset tsan
 
 ```bash
 clang-format -i \
-  app/*.cpp include/pulsegate/core/*.h include/pulsegate/net/*.h \
-  src/core/*.cpp src/net/*.cpp tests/unit/*.cpp tests/integration/*.cpp
+  app/*.cpp include/pulsegate/core/*.h include/pulsegate/http/*.h \
+  include/pulsegate/net/*.h include/pulsegate/runtime/*.h \
+  src/core/*.cpp src/http/*.cpp src/net/*.cpp tests/unit/*.cpp \
+  tests/integration/*.cpp
 ```
 
 通过构建生成的编译数据库运行静态检查：
@@ -107,7 +126,7 @@ clang-format -i \
 ```bash
 clang-tidy -p build/debug \
   app/pulsegate_main.cpp app/pulsegate_sync_main.cpp \
-  src/core/version.cpp src/net/*.cpp \
+  src/core/version.cpp src/http/*.cpp src/net/*.cpp \
   tests/unit/smoke_test.cpp tests/integration/*.cpp
 ```
 

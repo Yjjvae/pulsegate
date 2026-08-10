@@ -82,3 +82,43 @@ curl --noproxy '*' --include http://127.0.0.1:8080/health
 
 按 `Ctrl+C` 停止同步服务器。本阶段服务是刻意保留的串行基线：一个慢客户端会
 阻塞后续连接，后面的异步章节将解决这个问题。
+
+## 阶段 2：增量 HTTP 解析与单线程协程服务器验收
+
+```bash
+cmake --preset debug
+cmake --build --preset debug
+ctest --preset debug --output-on-failure
+
+cmake --preset release
+cmake --build --preset release
+
+cmake --preset asan
+cmake --build --preset asan
+ctest --preset asan --output-on-failure
+```
+
+手工运行当前异步主程序：
+
+```bash
+./build/debug/app/pulsegate --listen 127.0.0.1:8080
+curl --noproxy '*' --include http://127.0.0.1:8080/healthz
+```
+
+验证 Keep-Alive 与顺序 Pipelining：
+
+```bash
+printf 'GET /healthz HTTP/1.1\r\nHost: localhost\r\n\r\nGET /healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' \
+  | nc 127.0.0.1 8080
+```
+
+预期结果：
+
+- Buffer 和解析器单元测试覆盖字节级分片、Header/Body 限制和 pipelining 剩余字节；
+- 一个仅发送 1 字节的客户端不会阻塞另一条连接的响应；
+- 100 个连接能在单个 `io_context` 线程上完成；
+- 解析错误被映射到 400、413、431 或 501，并关闭连接；
+- `Listener::stop()` 取消等待中的 `async_accept`；
+- ASan/UBSan 没有报告内存错误或未定义行为。
+
+性能基准及环境信息记录在 [v0.2.0 单线程基线](benchmarks/v0.2.0-single-thread.md)。

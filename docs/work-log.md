@@ -256,6 +256,57 @@
 - 完整 HTTP/1.1 增量解析、持久连接和协议限制将在第七章实现；
 - CI Workflow 与 `build-and-test` 必需检查仍按后续 CI 章节实现。
 
+## 2026-08-10
+
+### 第七章：HTTP/1.1 增量解析
+
+完成内容：
+
+- 新增带读写下标、可扩容且有绝对容量上限的 `net::Buffer`；
+- 新增大小写不敏感的 Header 容器、请求对象和拥有字节的响应序列化；
+- 实现 HTTP/1.0/1.1 请求行、Host、`Content-Length`、Keep-Alive 解析；
+- 实现增量状态机，支持分片输入并保留 pipelining 的后续请求字节；
+- 限制请求行、Header 总量、Header 数量、单 Header 和 Body 大小；
+- 拒绝冲突 `Content-Length`、裸 CR/LF 注入和未支持的
+  `Transfer-Encoding`；
+- 新增 Buffer、Parser 和 Response 共 21 个单元测试。
+
+重要决策：
+
+- Parser 不依赖 Boost.Asio Socket，只消费 `Buffer`，因此协议测试无需网络；
+- Header 名称统一小写存储，值保留原内容；
+- v0.2 明确拒绝所有请求 `Transfer-Encoding`，不伪装支持 chunked；
+- 响应在 `async_write` 前序列化为独立 `std::string`，保证协程挂起期间内存有效。
+
+### 第八章：单线程 Boost.Asio 协程服务器
+
+完成内容：
+
+- 新增 `spawnGuarded`，为顶层协程统一收口未知异常；
+- 新增带 strand 的 `Listener`，支持跨线程 `stop()`、accept 重试退避和端口 0；
+- 新增 `HttpSession`，使用 `async_read_some`、`async_write` 和 Parser 完成
+  Keep-Alive/Pipelining 循环；
+- 将主程序升级为单线程 C++20 Coroutine HTTP Server，并处理 SIGINT/SIGTERM；
+- 提供 `/healthz`，并实现 404、405 和 Parser 错误的 HTTP 映射；
+- 新增 10 个回环集成测试，覆盖慢客户端、100 连接、提前断开、停止 accept、
+  分片和 pipelining；
+- 项目版本升级到 `0.2.0`，补充阶段验收和基准记录模板。
+
+验证结果：
+
+- 第 7、8 章定向测试 31/31 通过；
+- Debug、ASan/UBSan、TSan 下完整测试均为 42/42 通过；
+- Release 和 `PULSEGATE_WARNINGS_AS_ERRORS=ON` 构建成功；
+- Release 手工 `curl --noproxy '*' http://127.0.0.1:18081/healthz` 返回
+  `HTTP/1.1 200 OK`、`Content-Length: 3` 和 `ok\n`；
+- `wrk` 基准待用户在有 sudo 交互权限的终端安装后实际执行。
+
+遗留事项：
+
+- 当前没有超时、取消原因分类和完整 Session Registry，这些是第九章范围；
+- 多线程 `io_context`、业务路由和完整 HTTP/1.1 chunked 解析尚未引入；
+- 基准结果必须来自 Release 可执行程序，不能用 Debug 或同步基线替代。
+
 ## 后续记录模板
 
 ```markdown
