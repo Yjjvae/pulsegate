@@ -433,6 +433,48 @@
 - 下一阶段实现协程式反向代理、上游响应解析和上游 deadline；
 - 静态文件的大文件流式传输、range、ETag、缓存控制及平台 sendfile adapter 暂不实现。
 
+## 2026-08-10
+
+### 第十二章：Boost.Asio 协程式反向代理
+
+完成内容：
+
+- 新增 `HttpResponseParser`：增量处理 Content-Length、chunked、HEAD、1xx 中间响应、204/304、
+  EOF 定界 Body，以及 Header/Body 绝对上限、冲突长度与提前 EOF 错误；
+- 新增显式状态机 `ProxySession`：Resolver、Socket、阶段 deadline、总 deadline 与取消均绑定到
+  下游 Session executor；使用 `async_resolve`、`async_connect`、`async_write`、`async_read_some`；
+- 新增 `/proxy/*` Router handler 与重复 `--proxy-upstream HOST:PORT` 参数；所有当前配置的上游
+  采用原子 Round Robin 选择；
+- 请求方向移除 hop-by-hop Header 及 `Connection` 点名字段，重建 `Host`、`X-Forwarded-For`、
+  `X-Forwarded-Proto` 和 `X-Request-Id`；Upgrade 明确返回 501；
+- `RequestContext` 增加 Session-owned 流式写入回调。ProxySession 上游 Header 一到即写下游
+  chunked Header；每个下游 `async_write` 完成后才继续读上游，避免无界待写队列；
+- 已开始下游响应后若上游失败，只关闭下游而不追加错误 HTTP 响应；Session 关闭或停机时可取消
+  已登记的 resolver/socket 事务；
+- 新增纯标准库 `tools/mock_upstream.py`，支持延迟、chunked、分片 Header、提前断开和停住 Body，
+  便于重现代理边界；开发版本提升为 `0.6.0`。
+
+验证结果：
+
+- Debug、ASan/UBSan、TSan 完整 CTest 均为 74/74 通过；
+- `-DPULSEGATE_WARNINGS_AS_ERRORS=ON` 构建通过；Release 构建成功且 `--version` 输出 `0.6.0`；
+- 集成测试覆盖分片 chunked 上游、POST 分片 Body、两个上游 Round Robin、Header 清理和 request ID；
+- Release 手工启动 Python mock 与网关后，`/proxy/demo` 返回 200、chunked 与 `X-Request-Id`；
+  mock 同时记录相同 request ID。
+
+重要决策：
+
+- 连接池和主动健康检查明确保留到第 13 章；第 12 章每次事务关闭上游连接，避免在没有独占 Lease
+  和跨 executor 归还语义前实现不安全的伪连接池；
+- 当前请求 Body 由下游 Parser 完整且有上限地读取后转发，因此只将**响应方向**描述为流式；不把它
+  描述成双向请求流式；
+- 下游流式输出只能经 `HttpSession` 提供的回调执行，ProxySession 不直接持有或并发操作下游 Socket。
+
+遗留事项：
+
+- 下一章实现主动/被动健康检查、strand-owned 上游连接池和独占 Lease；
+- 请求方向 chunked 与边读边写、重试策略、WebSocket/TLS 代理仍不在当前版本范围内。
+
 ## 后续记录模板
 
 ```markdown

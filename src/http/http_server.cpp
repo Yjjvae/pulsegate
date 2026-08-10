@@ -11,6 +11,7 @@
 #include <utility>
 
 #include "pulsegate/core/version.h"
+#include "pulsegate/http/reverse_proxy.h"
 #include "pulsegate/runtime/coroutine_guard.h"
 #include "pulsegate/runtime/scope_exit.h"
 
@@ -240,12 +241,29 @@ net::Awaitable<void> HttpSession::run() {
         const bool head_request = request->method == HttpMethod::Head;
         net::ErrorCode endpoint_error;
         const auto peer = socket_.remote_endpoint(endpoint_error);
-        RequestContext context{.executor = socket_.get_executor(),
-                               .request_id = router_->nextRequestId(),
-                               .peer = endpoint_error ? net::tcp::endpoint{} : peer,
-                               .downstream = weak_from_this()};
+        RequestContext context{
+            .executor = socket_.get_executor(),
+            .request_id = router_->nextRequestId(),
+            .peer = endpoint_error ? net::tcp::endpoint{} : peer,
+            .downstream = weak_from_this(),
+            .set_current_proxy =
+                [weak = weak_from_this()](std::weak_ptr<ProxySession> proxy) {
+                    if (auto session = weak.lock()) {
+                        session->current_proxy_ = std::move(proxy);
+                    }
+                },
+            .write_downstream = [weak =
+                                     weak_from_this()](std::string bytes) -> net::Awaitable<bool> {
+                if (auto session = weak.lock()) {
+                    co_return co_await session->writeDownstream(std::move(bytes));
+                }
+                co_return false;
+            }};
         auto response = co_await router_->handle(context, std::move(*request));
-        co_await writeResponse(response, head_request);
+        current_proxy_.reset();
+        if (!response.already_written) {
+            co_await writeResponse(response, head_request);
+        }
         served_request_ = true;
         if (response.close_connection || close_after_response || state_ == SessionState::Draining ||
             state_ == SessionState::Closing || state_ == SessionState::Closed) {
@@ -309,6 +327,19 @@ net::Awaitable<void> HttpSession::writeResponse(const HttpResponse& response, bo
     }
 }
 
+net::Awaitable<bool> HttpSession::writeDownstream(std::string bytes) {
+    net::ErrorCode error;
+    co_await net::asio::async_write(socket_, net::asio::buffer(bytes),
+                                    net::asio::redirect_error(net::use_awaitable, error));
+    if (error) {
+        if (stop_reason_ == StopReason::None) {
+            stop_reason_ = StopReason::PeerClosed;
+        }
+        co_return false;
+    }
+    co_return true;
+}
+
 net::Awaitable<void> HttpSession::writeParserError(ParseResult result) {
     co_await writeResponse(makeErrorResponse(result), false);
 }
@@ -357,6 +388,11 @@ void HttpSession::closeInExecutor(StopReason reason) {
         stop_reason_ = reason;
     }
     deadline_->disarm();
+    if (auto proxy = current_proxy_.lock()) {
+        proxy->cancel(reason == StopReason::ServerShutdown ? ProxyStopReason::ServerShutdown
+                                                           : ProxyStopReason::DownstreamClosed);
+    }
+    current_proxy_.reset();
 
     net::ErrorCode ignored;
     socket_.cancel(ignored);

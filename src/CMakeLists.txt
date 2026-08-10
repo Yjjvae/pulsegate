@@ -84,8 +84,10 @@ target_sources(
     http/http_parser.cpp
     http/http_request.cpp
     http/http_response.cpp
+    http/http_response_parser.cpp
     http/http_server.cpp
     http/router.cpp
+    http/reverse_proxy.cpp
     http/static_file_handler.cpp
 )
 target_include_directories(
