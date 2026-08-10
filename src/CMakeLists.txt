@@ -43,3 +43,24 @@ target_compile_definitions(
   INTERFACE
     BOOST_ASIO_NO_DEPRECATED
 )
+
+add_library(pulsegate_net STATIC)
+add_library(PulseGate::net ALIAS pulsegate_net)
+
+target_sources(
+  pulsegate_net
+  PRIVATE
+    net/endpoint.cpp
+    net/sync_http_server.cpp
+)
+target_include_directories(
+  pulsegate_net
+  PUBLIC
+    "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>"
+    "$<INSTALL_INTERFACE:include>"
+)
+target_link_libraries(
+  pulsegate_net
+  PUBLIC
+    PulseGate::runtime
+)
