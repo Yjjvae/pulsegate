@@ -10,6 +10,7 @@
 #include <string>
 #include <utility>
 
+#include "pulsegate/core/version.h"
 #include "pulsegate/runtime/coroutine_guard.h"
 #include "pulsegate/runtime/scope_exit.h"
 
@@ -169,19 +170,19 @@ void SessionRegistry::pruneExpiredLocked() {
     }
 }
 
-HttpSession::HttpSession(net::tcp::socket socket, RequestHandler handler,
+HttpSession::HttpSession(net::tcp::socket socket, std::shared_ptr<Router> router,
                          std::shared_ptr<SessionRegistry> registry, SessionId id,
                          SessionLimits limits)
     : socket_(std::move(socket)),
-      handler_(std::move(handler)),
+      router_(std::move(router)),
       limits_(limits),
       input_(limits_.read_chunk_bytes, limits_.max_buffer_bytes),
       parser_(limits_.parser),
       registry_(std::move(registry)),
       id_(id),
       deadline_(std::make_shared<net::Deadline>(socket_.get_executor())) {
-    if (!handler_ || !registry_) {
-        throw std::invalid_argument("HTTP session requires a handler and session registry");
+    if (!router_ || !registry_) {
+        throw std::invalid_argument("HTTP session requires a router and session registry");
     }
     if (limits_.read_chunk_bytes == 0 || limits_.max_buffer_bytes < limits_.read_chunk_bytes ||
         limits_.max_buffer_bytes < limits_.parser.max_header_bytes ||
@@ -235,11 +236,18 @@ net::Awaitable<void> HttpSession::run() {
             break;
         }
 
-        auto response = handler_(*request);
-        const bool close_after_response = response.close_connection || !request->keepAlive();
-        co_await writeResponse(response, request->method == HttpMethod::Head);
+        const bool close_after_response = !request->keepAlive();
+        const bool head_request = request->method == HttpMethod::Head;
+        net::ErrorCode endpoint_error;
+        const auto peer = socket_.remote_endpoint(endpoint_error);
+        RequestContext context{.executor = socket_.get_executor(),
+                               .request_id = router_->nextRequestId(),
+                               .peer = endpoint_error ? net::tcp::endpoint{} : peer,
+                               .downstream = weak_from_this()};
+        auto response = co_await router_->handle(context, std::move(*request));
+        co_await writeResponse(response, head_request);
         served_request_ = true;
-        if (close_after_response || state_ == SessionState::Draining ||
+        if (response.close_connection || close_after_response || state_ == SessionState::Draining ||
             state_ == SessionState::Closing || state_ == SessionState::Closed) {
             break;
         }
@@ -364,11 +372,30 @@ void HttpSession::closeInExecutor(StopReason reason) {
 
 HttpServer::HttpServer(net::asio::io_context& context, net::ListenConfig config,
                        RequestHandler handler, SessionLimits limits)
-    : registry_(std::make_shared<SessionRegistry>(limits.max_connections)) {
-    if (!handler) {
-        handler = defaultHandler;
-    }
+    : HttpServer(
+          context, config, RouterConfig{[&handler] {
+              if (!handler) {
+                  return makeDefaultRouter();
+              }
+              auto router = std::make_shared<Router>();
+              router->add(Route{
+                  .method = HttpMethod::Unknown,
+                  .pattern = "/",
+                  .name = "legacy_handler",
+                  .prefix_match = true,
+                  .handler = [handler = std::move(handler)](RequestContext&, HttpRequest request)
+                      -> net::Awaitable<HttpResponse> { co_return handler(request); }});
+              return router;
+          }()},
+          limits) {}
 
+HttpServer::HttpServer(net::asio::io_context& context, net::ListenConfig config,
+                       RouterConfig router_config, SessionLimits limits)
+    : registry_(std::make_shared<SessionRegistry>(limits.max_connections)) {
+    auto router = std::move(router_config.router);
+    if (!router) {
+        throw std::invalid_argument("HTTP server requires a router");
+    }
     net::ErrorCode error;
     const auto endpoint = net::makeEndpoint(config, error);
     if (error) {
@@ -378,11 +405,11 @@ HttpServer::HttpServer(net::asio::io_context& context, net::ListenConfig config,
     auto next_session_id = std::make_shared<std::atomic<SessionId>>(1);
     listener_ = std::make_shared<net::Listener>(
         context, endpoint, config.backlog,
-        [handler = std::move(handler), limits, registry = registry_,
+        [router = std::move(router), limits, registry = registry_,
          next_session_id](net::tcp::socket socket) {
             const auto id = next_session_id->fetch_add(1, std::memory_order_relaxed);
             auto session =
-                std::make_shared<HttpSession>(std::move(socket), handler, registry, id, limits);
+                std::make_shared<HttpSession>(std::move(socket), router, registry, id, limits);
             if (registry->tryAdd(id, session)) {
                 session->start();
             } else {
@@ -417,24 +444,43 @@ std::size_t HttpServer::closedCount(StopReason reason) const {
     return registry_->closedCount(reason);
 }
 
-HttpResponse HttpServer::defaultHandler(const HttpRequest& request) {
-    HttpResponse response;
-    response.headers.add("Content-Type", "text/plain");
-    if (request.target != "/healthz") {
-        response.status_code = 404;
-        response.reason = "Not Found";
-        response.body = "not found\n";
-        return response;
-    }
-    if (request.method == HttpMethod::Get || request.method == HttpMethod::Head) {
-        response.body = "ok\n";
-        return response;
-    }
-    response.status_code = 405;
-    response.reason = "Method Not Allowed";
-    response.body = "method not allowed\n";
-    response.headers.add("Allow", "GET, HEAD");
-    return response;
+std::shared_ptr<Router> HttpServer::makeDefaultRouter() {
+    auto router = std::make_shared<Router>();
+    const auto text = [](std::string body) {
+        return
+            [body = std::move(body)](RequestContext&, HttpRequest) -> net::Awaitable<HttpResponse> {
+                HttpResponse response;
+                response.body = body;
+                response.headers.add("Content-Type", "text/plain");
+                co_return response;
+            };
+    };
+    const auto add_get_and_head = [&router](std::string path, std::string name,
+                                            HttpHandler handler) {
+        router->add(
+            Route{.method = HttpMethod::Get, .pattern = path, .name = name, .handler = handler});
+        router->add(Route{.method = HttpMethod::Head,
+                          .pattern = std::move(path),
+                          .name = std::move(name),
+                          .handler = std::move(handler)});
+    };
+    add_get_and_head("/healthz", "healthz", text("ok\n"));
+    add_get_and_head("/livez", "livez", text("alive\n"));
+    add_get_and_head("/readyz", "readyz", text("ready\n"));
+    add_get_and_head("/metrics", "metrics", text("pulsegate_ready 1\n"));
+    add_get_and_head("/api/version", "version",
+                     text(std::string(pulsegate::core::version()) + "\n"));
+    router->add(
+        Route{.method = HttpMethod::Post,
+              .pattern = "/echo",
+              .name = "echo",
+              .handler = [](RequestContext&, HttpRequest request) -> net::Awaitable<HttpResponse> {
+                  HttpResponse response;
+                  response.body = std::move(request.body);
+                  response.headers.add("Content-Type", "application/octet-stream");
+                  co_return response;
+              }});
+    return router;
 }
 
 }  // namespace pulsegate::http

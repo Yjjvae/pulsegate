@@ -80,10 +80,13 @@ target_sources(
   pulsegate_http
   PRIVATE
     http/headers.cpp
+    http/file_service.cpp
     http/http_parser.cpp
     http/http_request.cpp
     http/http_response.cpp
     http/http_server.cpp
+    http/router.cpp
+    http/static_file_handler.cpp
 )
 target_include_directories(
   pulsegate_http
@@ -94,5 +97,6 @@ target_include_directories(
 target_link_libraries(
   pulsegate_http
   PUBLIC
+    PulseGate::core
     PulseGate::net
 )

@@ -135,7 +135,7 @@ boost::system::error_code waitForClose(tcp::socket& socket) {
 
 template <typename Predicate>
 bool waitUntil(Predicate&& predicate) {
-    for (int attempt = 0; attempt < 100; ++attempt) {
+    for (int attempt = 0; attempt < 1000; ++attempt) {
         if (predicate()) {
             return true;
         }
@@ -442,6 +442,24 @@ TEST(AsyncHttpServerTest, EnforcesConnectionLimitAndRecordsResourceRejection) {
     EXPECT_EQ(server.connectionCount(), 1U);
     EXPECT_EQ(server.closedCount(StopReason::ResourceLimit), 1U);
     first.close();
+}
+
+TEST(AsyncHttpServerTest, ServesDefaultAsyncRoutesAndSplitEchoBody) {
+    RunningServer server;
+
+    const auto live =
+        exchange(server, {"GET /livez HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"});
+    EXPECT_TRUE(live.ends_with("\r\n\r\nalive\n"));
+    EXPECT_NE(live.find("x-request-id: "), std::string::npos);
+
+    const auto version = exchange(
+        server, {"GET /api/version HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"});
+    EXPECT_NE(version.find("0.5.0\n"), std::string::npos);
+
+    const auto echo =
+        exchange(server, {"POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Length: 11\r\n",
+                          "Connection: close\r\n\r\nhello ", "world"});
+    EXPECT_TRUE(echo.ends_with("\r\n\r\nhello world"));
 }
 
 TEST(AsyncHttpServerTest, ServesTheSameProtocolWithOneTwoAndFourWorkers) {

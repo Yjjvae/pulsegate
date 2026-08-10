@@ -4,9 +4,11 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <utility>
 
 #include "pulsegate/http/http_parser.h"
 #include "pulsegate/http/http_response.h"
+#include "pulsegate/http/router.h"
 #include "pulsegate/http/session_lifecycle.h"
 #include "pulsegate/net/deadline.h"
 #include "pulsegate/net/endpoint.h"
@@ -26,9 +28,15 @@ struct SessionLimits {
     std::size_t max_connections{1024};
 };
 
+struct RouterConfig {
+    explicit RouterConfig(std::shared_ptr<Router> value) : router(std::move(value)) {}
+
+    std::shared_ptr<Router> router;
+};
+
 class HttpSession : public std::enable_shared_from_this<HttpSession> {
    public:
-    HttpSession(net::tcp::socket socket, RequestHandler handler,
+    HttpSession(net::tcp::socket socket, std::shared_ptr<Router> router,
                 std::shared_ptr<SessionRegistry> registry, SessionId id, SessionLimits limits = {});
 
     void start();
@@ -49,7 +57,7 @@ class HttpSession : public std::enable_shared_from_this<HttpSession> {
     void closeInExecutor(StopReason reason);
 
     net::tcp::socket socket_;
-    RequestHandler handler_;
+    std::shared_ptr<Router> router_;
     SessionLimits limits_;
     net::Buffer input_;
     HttpParser parser_;
@@ -67,16 +75,17 @@ class HttpServer {
    public:
     HttpServer(net::asio::io_context& context, net::ListenConfig config,
                RequestHandler handler = {}, SessionLimits limits = {});
+    HttpServer(net::asio::io_context& context, net::ListenConfig config, RouterConfig router,
+               SessionLimits limits = {});
 
     void start();
     void stop();
     [[nodiscard]] net::tcp::endpoint localEndpoint() const;
     [[nodiscard]] std::size_t connectionCount() const;
     [[nodiscard]] std::size_t closedCount(StopReason reason) const;
+    [[nodiscard]] static std::shared_ptr<Router> makeDefaultRouter();
 
    private:
-    static HttpResponse defaultHandler(const HttpRequest& request);
-
     std::shared_ptr<net::Listener> listener_;
     std::shared_ptr<SessionRegistry> registry_;
 };

@@ -3,14 +3,19 @@
 #include <charconv>
 #include <cstdint>
 #include <exception>
+#include <filesystem>
 #include <iostream>
+#include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <utility>
 
 #include "pulsegate/core/version.h"
 #include "pulsegate/http/http_server.h"
+#include "pulsegate/http/static_file_handler.h"
 #include "pulsegate/runtime/asio_runtime.h"
 
 namespace {
@@ -69,7 +74,8 @@ std::size_t defaultThreadCount() {
 
 void printUsage(std::ostream& output) {
     output << "PulseGate " << pulsegate::core::version() << '\n'
-           << "Usage: pulsegate [--listen HOST:PORT] [--threads N] [--help | --version]\n\n"
+           << "Usage: pulsegate [--listen HOST:PORT] [--threads N] [--document-root PATH] "
+              "[--help | --version]\n\n"
            << "Multi-threaded Boost.Asio coroutine HTTP server.\n"
            << "Example: pulsegate --listen 127.0.0.1:8080 --threads 4\n";
 }
@@ -80,6 +86,7 @@ int main(int argc, char* argv[]) {
     try {
         pulsegate::net::ListenConfig config;
         std::size_t thread_count = defaultThreadCount();
+        std::optional<std::filesystem::path> document_root;
         for (int index = 1; index < argc; ++index) {
             const std::string_view argument(argv[index]);
             if (argument == "--version") {
@@ -102,11 +109,35 @@ int main(int argc, char* argv[]) {
                 thread_count = parseThreadCount(argv[++index]);
                 continue;
             }
+            if (argument == "--document-root" && index + 1 < argc) {
+                document_root = argv[++index];
+                continue;
+            }
             throw std::invalid_argument("unknown or incomplete argument: " + std::string(argument));
         }
 
         pulsegate::runtime::AsioRuntime runtime(thread_count);
-        pulsegate::http::HttpServer server(runtime.context(), config);
+        auto router = pulsegate::http::HttpServer::makeDefaultRouter();
+        if (document_root) {
+            auto files = std::make_shared<pulsegate::http::BoundedFileService>(*document_root);
+            pulsegate::http::StaticFileHandler static_files(*document_root, files);
+            const auto add_static = [&router, static_files](pulsegate::http::HttpMethod method) {
+                router->add(pulsegate::http::Route{
+                    .method = method,
+                    .pattern = "/static/",
+                    .name = "static_files",
+                    .prefix_match = true,
+                    .handler = [static_files](pulsegate::http::RequestContext& context,
+                                              pulsegate::http::HttpRequest request)
+                        -> pulsegate::net::Awaitable<pulsegate::http::HttpResponse> {
+                        co_return co_await static_files(context, std::move(request));
+                    }});
+            };
+            add_static(pulsegate::http::HttpMethod::Get);
+            add_static(pulsegate::http::HttpMethod::Head);
+        }
+        pulsegate::http::HttpServer server(runtime.context(), config,
+                                           pulsegate::http::RouterConfig{std::move(router)});
         const auto endpoint = server.localEndpoint();
         std::cout << "PulseGate listening on " << endpoint.address().to_string() << ':'
                   << endpoint.port() << '\n';
