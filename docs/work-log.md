@@ -299,7 +299,8 @@
 - Release 和 `PULSEGATE_WARNINGS_AS_ERRORS=ON` 构建成功；
 - Release 手工 `curl --noproxy '*' http://127.0.0.1:18081/healthz` 返回
   `HTTP/1.1 200 OK`、`Content-Length: 3` 和 `ok\n`；
-- `wrk` 基准待用户在有 sudo 交互权限的终端安装后实际执行。
+- Release `wrk -t2 -c100 -d30s --latency` 基准完成：133,476.87 RPS，
+  平均延迟 744.30 µs，P99 1.58 ms，4,004,433 requests 且无 socket error。
 
 遗留事项：
 
