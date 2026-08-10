@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "pulsegate/core/version.h"
+#include "pulsegate/http/health_checker.h"
 #include "pulsegate/http/http_server.h"
 #include "pulsegate/http/reverse_proxy.h"
 #include "pulsegate/http/static_file_handler.h"
@@ -116,6 +117,8 @@ int main(int argc, char* argv[]) {
         std::size_t thread_count = defaultThreadCount();
         std::optional<std::filesystem::path> document_root;
         std::vector<pulsegate::http::UpstreamEndpoint> proxy_upstreams;
+        std::vector<std::shared_ptr<pulsegate::http::HealthChecker>> health_checkers;
+        std::vector<pulsegate::http::ReverseProxy> reverse_proxies;
         for (int index = 1; index < argc; ++index) {
             const std::string_view argument(argv[index]);
             if (argument == "--version") {
@@ -170,7 +173,14 @@ int main(int argc, char* argv[]) {
             add_static(pulsegate::http::HttpMethod::Head);
         }
         if (!proxy_upstreams.empty()) {
-            pulsegate::http::ReverseProxy proxy(std::move(proxy_upstreams));
+            auto upstreams = std::move(proxy_upstreams);
+            pulsegate::http::ReverseProxy proxy(upstreams);
+            auto checker = std::make_shared<pulsegate::http::HealthChecker>(
+                runtime.context().get_executor(), pulsegate::http::HealthCheckConfig{}, upstreams,
+                proxy.health());
+            checker->start();
+            health_checkers.push_back(std::move(checker));
+            reverse_proxies.push_back(proxy);
             const auto add_proxy = [&router, proxy](pulsegate::http::HttpMethod method) {
                 router->add(pulsegate::http::Route{
                     .method = method,
@@ -196,7 +206,14 @@ int main(int argc, char* argv[]) {
                   << endpoint.port() << '\n';
 
         boost::asio::signal_set signals(runtime.context(), SIGINT, SIGTERM);
-        signals.async_wait([&server, &runtime](const boost::system::error_code&, int) {
+        signals.async_wait([&server, &runtime, &health_checkers, &reverse_proxies](
+                               const boost::system::error_code&, int) {
+            for (const auto& checker : health_checkers) {
+                checker->stop();
+            }
+            for (const auto& proxy : reverse_proxies) {
+                proxy.stop();
+            }
             server.stop();
             runtime.requestStop();
         });

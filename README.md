@@ -2,8 +2,8 @@
 
 PulseGate 是一个用 C++20 和 Boost.Asio 逐步实现的 HTTP 网关学习项目。
 
-当前开发进度是教程第 12 章“Boost.Asio 协程式反向代理”。当前开发版本为 `0.6.0`；最近发布
-标签为第 11 章的 `v0.5.0`。主程序使用一个 `io_context` 和可配置数量的工作线程；每条
+当前开发进度是教程第 13 章“主动健康检查与上游连接池”。当前开发版本为 `0.7.0`；最近发布
+标签为 `v0.6.0`。主程序使用一个 `io_context` 和可配置数量的工作线程；每条
 Session 仍有自己的 strand，因此并发不会让单条连接的状态并行修改。
 
 完整教学见 [PROJECT_TUTORIAL.md](PROJECT_TUTORIAL.md)。
@@ -109,8 +109,24 @@ curl --noproxy '*' --include http://127.0.0.1:8080/proxy/demo
 
 代理会移除 hop-by-hop Header，并重建 `Host`、`X-Forwarded-For`、`X-Forwarded-Proto` 与
 `X-Request-Id`。下游响应在上游 Header 到达后使用 chunked 编码逐块写出；每次写完成前不会
-继续读取下一块上游数据。请求 Body 仍由当前下游 Parser 完整、有上限地读入后才转发；WebSocket
-Upgrade、请求 chunked、重试、健康检查和跨事务上游连接池将在后续章节实现。
+继续读取下一块上游数据。请求 Body 仍由当前下游 Parser 完整、有上限地读入后才转发。
+
+每个上游端点都有一个 strand-owned 连接池：请求先异步取得独占 Lease；只有完整解析响应、上游
+没有声明 `Connection: close`、没有残留字节且没有超时/取消时，连接才会归还。默认主动探测
+`/healthz`，2 秒一轮；连续 3 次失败会摘除端点，连续 2 次成功会恢复。Health Probe 使用独立连接，
+不会占用业务池。WebSocket Upgrade、请求 chunked 和自动重试尚未实现。
+
+要手工确认连接复用，可让 mock 保持上游连接：
+
+```bash
+python3 tools/mock_upstream.py --port 9001 --name upstream-a --keep-alive
+./build/debug/app/pulsegate --listen 127.0.0.1:8080 --threads 1 \
+  --proxy-upstream 127.0.0.1:9001
+curl --noproxy '*' http://127.0.0.1:8080/proxy/one
+curl --noproxy '*' http://127.0.0.1:8080/proxy/two
+```
+
+mock 输出中两条业务请求应具有同一个 `connection=N`；健康检查会额外建立独立连接，这是预期行为。
 
 第 6 章同步基线仍保留为独立学习程序：
 

@@ -475,6 +475,40 @@
 - 下一章实现主动/被动健康检查、strand-owned 上游连接池和独占 Lease；
 - 请求方向 chunked 与边读边写、重试策略、WebSocket/TLS 代理仍不在当前版本范围内。
 
+## 2026-08-10
+
+### 第十三章：主动健康检查与上游连接池
+
+完成内容：
+
+- 新增不可变 `HealthSnapshot` 与阈值状态机；代理热路径无锁读取健康快照，健康端点不可用时返回 503；
+- 新增 `HealthChecker`：独立 Probe socket、可取消 interval/timeout、并发上限与端点轮转；停机时取消
+  已安排的 Probe；
+- 新增 pool strand、异步 `asyncAcquire()`、有界 waiter 队列、acquire timeout、空闲/寿命/复用次数
+  限制、空闲清理 timer 及停机取消；
+- 新增 move-only Lease；遗漏显式归还时只异步 discard，成功事务只有在 parser 确认连接可复用后才归还；
+- 将 `UpstreamConnection` 的 resolver/socket 放入连接专属 strand；代理按端点懒创建池并在 SIGINT/SIGTERM
+  时停止所有池；
+- mock upstream 新增可选 `--keep-alive`，可从日志中的相同 `connection=N` 观察复用。
+
+验证结果：
+
+- Debug 构建通过；完整 CTest 在本机回环环境中为 **87/87 通过**，其中包括新增长连接复用场景；
+- `-DPULSEGATE_WARNINGS_AS_ERRORS=ON` 的无测试构建通过；
+- ASan/UBSan 与 TSan 完整 CTest 均为 **87/87 通过**；Release 构建成功且 `--version` 输出 `0.7.0`；
+- 普通沙箱会禁止测试进程创建 socket；在允许本机回环 TCP 的测试环境中完成了完整 CTest。
+
+重要决策：
+
+- 连接的 socket 不跟随下游 Session strand 复用；它由 `UpstreamConnection` 的独立 strand 管理，Lease
+  保证同一时刻只允许一个事务操作该连接；
+- 对任何协议、超时、取消、残留字节或 `Connection: close` 情况采取 discard，而不是尝试复用。
+
+遗留事项：
+
+- 在允许网络 socket 的 CI/本机补充两次真实代理请求复用同一连接、Probe 恢复以及多 worker/TSan 验证；
+- 代理 CLI 暂未暴露健康阈值和 pool 上限配置，当前采用代码默认值。
+
 ## 后续记录模板
 
 ```markdown

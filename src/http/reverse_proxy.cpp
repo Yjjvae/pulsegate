@@ -1,6 +1,7 @@
 #include "pulsegate/http/reverse_proxy.h"
 
 #include <algorithm>
+#include <boost/asio/bind_executor.hpp>
 #include <boost/asio/connect.hpp>
 #include <boost/asio/dispatch.hpp>
 #include <boost/asio/write.hpp>
@@ -132,9 +133,7 @@ std::string serializeUpstreamRequest(const HttpRequest& request, const UpstreamE
     bytes.append(context.request_id);
     bytes.append("\r\nContent-Length: ");
     bytes.append(std::to_string(request.body.size()));
-    // v0.6.0-a closes every upstream transaction. This makes response framing
-    // and retry semantics explicit before stage 7 introduces a pool.
-    bytes.append("\r\nConnection: close\r\n\r\n");
+    bytes.append("\r\nConnection: keep-alive\r\n\r\n");
     bytes.append(request.body);
     return bytes;
 }
@@ -162,6 +161,11 @@ HttpResponse makeProxyErrorResponse(ProxyError error) {
             response.reason = "Service Unavailable";
             response.body = "upstream transaction cancelled\n";
             break;
+        case ProxyError::NoHealthyUpstream:
+            response.status_code = 503;
+            response.reason = "Service Unavailable";
+            response.body = "no healthy upstream\n";
+            break;
         case ProxyError::UnsupportedRequest:
             response.status_code = 501;
             response.reason = "Not Implemented";
@@ -175,12 +179,11 @@ HttpResponse makeProxyErrorResponse(ProxyError error) {
 }
 
 ProxySession::ProxySession(net::asio::any_io_executor executor, UpstreamEndpoint upstream,
-                           ProxyLimits limits)
+                           ProxyLimits limits, UpstreamLease lease)
     : executor_(std::move(executor)),
       upstream_(std::move(upstream)),
       limits_(limits),
-      resolver_(executor_),
-      socket_(executor_),
+      lease_(std::move(lease)),
       phase_deadline_(std::make_shared<net::Deadline>(executor_)),
       total_deadline_(std::make_shared<net::Deadline>(executor_)),
       input_(limits_.read_chunk_bytes, limits_.max_buffer_bytes),
@@ -190,6 +193,11 @@ ProxySession::ProxySession(net::asio::any_io_executor executor, UpstreamEndpoint
         !positive(limits_.connect_timeout) || !positive(limits_.response_timeout) ||
         !positive(limits_.total_timeout))
         throw std::invalid_argument("proxy configuration is outside safe bounds");
+    if (lease_ && lease_->connection_ && lease_->connection_->transport) {
+        connection_ = lease_->connection_->transport;
+    } else {
+        connection_ = std::make_shared<UpstreamConnection>(executor_, upstream_);
+    }
 }
 
 net::Awaitable<ProxyResult> ProxySession::execute(RequestContext& context, HttpRequest request) {
@@ -203,7 +211,7 @@ net::Awaitable<ProxyResult> ProxySession::execute(RequestContext& context, HttpR
     total_deadline_->arm(limits_.total_timeout, [weak = weak_from_this()] {
         if (auto locked = weak.lock()) locked->cancelInExecutor(ProxyStopReason::TotalTimeout);
     });
-    if (!co_await resolve() || !co_await connect()) {
+    if (!connection_->isOpen() && (!co_await resolve() || !co_await connect())) {
         disarmTimers();
         co_return ProxyResult{.error = errorForStopReason(), .response = {}, .upstream = upstream_};
     }
@@ -214,9 +222,6 @@ net::Awaitable<ProxyResult> ProxySession::execute(RequestContext& context, HttpR
     }
     auto result = co_await readResponse(request.method == HttpMethod::Head);
     disarmTimers();
-    net::ErrorCode ignored;
-    socket_.shutdown(net::tcp::socket::shutdown_both, ignored);
-    socket_.close(ignored);
     co_return result;
 }
 
@@ -235,7 +240,7 @@ net::Awaitable<ProxyResult> ProxySession::forward(RequestContext& context, HttpR
     total_deadline_->arm(limits_.total_timeout, [weak = weak_from_this()] {
         if (auto locked = weak.lock()) locked->cancelInExecutor(ProxyStopReason::TotalTimeout);
     });
-    if (!co_await resolve() || !co_await connect()) {
+    if (!connection_->isOpen() && (!co_await resolve() || !co_await connect())) {
         disarmTimers();
         co_return ProxyResult{.error = errorForStopReason(), .response = {}, .upstream = upstream_};
     }
@@ -246,9 +251,6 @@ net::Awaitable<ProxyResult> ProxySession::forward(RequestContext& context, HttpR
     }
     auto result = co_await forwardResponse(context);
     disarmTimers();
-    net::ErrorCode ignored;
-    socket_.shutdown(net::tcp::socket::shutdown_both, ignored);
-    socket_.close(ignored);
     co_return result;
 }
 
@@ -256,8 +258,10 @@ net::Awaitable<bool> ProxySession::resolve() {
     state_ = ProxyState::Resolving;
     armPhase(limits_.dns_timeout, ProxyStopReason::DnsTimeout);
     net::ErrorCode error;
-    resolved_ = co_await resolver_.async_resolve(
-        upstream_.host, upstream_.service, net::asio::redirect_error(net::use_awaitable, error));
+    resolved_ = co_await connection_->resolver().async_resolve(
+        upstream_.host, upstream_.service,
+        net::asio::redirect_error(
+            net::asio::bind_executor(connection_->executor(), net::use_awaitable), error));
     phase_deadline_->disarm();
     if (error || resolved_.empty()) {
         if (stop_reason_ == ProxyStopReason::None) stop_reason_ = ProxyStopReason::InternalError;
@@ -270,8 +274,10 @@ net::Awaitable<bool> ProxySession::connect() {
     state_ = ProxyState::Connecting;
     armPhase(limits_.connect_timeout, ProxyStopReason::ConnectTimeout);
     net::ErrorCode error;
-    co_await net::asio::async_connect(socket_, resolved_,
-                                      net::asio::redirect_error(net::use_awaitable, error));
+    co_await net::asio::async_connect(
+        connection_->socket(), resolved_,
+        net::asio::redirect_error(
+            net::asio::bind_executor(connection_->executor(), net::use_awaitable), error));
     phase_deadline_->disarm();
     if (error) {
         if (stop_reason_ == ProxyStopReason::None) stop_reason_ = ProxyStopReason::InternalError;
@@ -284,8 +290,10 @@ net::Awaitable<bool> ProxySession::sendRequest(const std::string& bytes) {
     state_ = ProxyState::SendingRequest;
     armPhase(limits_.response_timeout, ProxyStopReason::ResponseTimeout);
     net::ErrorCode error;
-    co_await net::asio::async_write(socket_, net::asio::buffer(bytes),
-                                    net::asio::redirect_error(net::use_awaitable, error));
+    co_await net::asio::async_write(
+        connection_->socket(), net::asio::buffer(bytes),
+        net::asio::redirect_error(
+            net::asio::bind_executor(connection_->executor(), net::use_awaitable), error));
     phase_deadline_->disarm();
     if (error) {
         if (stop_reason_ == ProxyStopReason::None) stop_reason_ = ProxyStopReason::InternalError;
@@ -301,9 +309,13 @@ net::Awaitable<ProxyResult> ProxySession::readResponse(bool head_request) {
         const auto parsed = parser_.parse(input_);
         if (parsed == ResponseParseResult::Complete) {
             state_ = ProxyState::Complete;
+            const bool reusable = parser_.reusable() && input_.readableBytes() == 0;
+            const auto upstream_status = parser_.response().status_code;
             co_return ProxyResult{.error = ProxyError::None,
                                   .response = sanitizeUpstreamResponse(parser_.takeResponse()),
-                                  .upstream = upstream_};
+                                  .upstream = upstream_,
+                                  .reusable = reusable,
+                                  .upstream_status = upstream_status};
         }
         if (parsed != ResponseParseResult::NeedMore) {
             state_ = ProxyState::Failed;
@@ -318,9 +330,10 @@ net::Awaitable<ProxyResult> ProxySession::readResponse(bool head_request) {
         auto writable = input_.prepare(limits_.read_chunk_bytes);
         armPhase(limits_.response_timeout, ProxyStopReason::ResponseTimeout);
         net::ErrorCode error;
-        const auto count =
-            co_await socket_.async_read_some(net::asio::buffer(writable.data(), writable.size()),
-                                             net::asio::redirect_error(net::use_awaitable, error));
+        const auto count = co_await connection_->socket().async_read_some(
+            net::asio::buffer(writable.data(), writable.size()),
+            net::asio::redirect_error(
+                net::asio::bind_executor(connection_->executor(), net::use_awaitable), error));
         phase_deadline_->disarm();
         if (error || count == 0) {
             if (stop_reason_ != ProxyStopReason::None) {
@@ -331,9 +344,12 @@ net::Awaitable<ProxyResult> ProxySession::readResponse(bool head_request) {
             const auto eof = parser_.finishOnEof();
             if (eof == ResponseParseResult::Complete) {
                 state_ = ProxyState::Complete;
+                const auto upstream_status = parser_.response().status_code;
                 co_return ProxyResult{.error = ProxyError::None,
                                       .response = sanitizeUpstreamResponse(parser_.takeResponse()),
-                                      .upstream = upstream_};
+                                      .upstream = upstream_,
+                                      .reusable = false,
+                                      .upstream_status = upstream_status};
             }
             state_ = ProxyState::Failed;
             co_return ProxyResult{
@@ -375,8 +391,11 @@ net::Awaitable<ProxyResult> ProxySession::forwardResponse(RequestContext& contex
             state_ = ProxyState::Complete;
             HttpResponse completed;
             completed.already_written = true;
-            co_return ProxyResult{
-                .error = ProxyError::None, .response = std::move(completed), .upstream = upstream_};
+            co_return ProxyResult{.error = ProxyError::None,
+                                  .response = std::move(completed),
+                                  .upstream = upstream_,
+                                  .reusable = parser_.reusable() && input_.readableBytes() == 0,
+                                  .upstream_status = parser_.response().status_code};
         }
         if (parsed != ResponseParseResult::NeedMore) {
             state_ = ProxyState::Failed;
@@ -393,9 +412,10 @@ net::Awaitable<ProxyResult> ProxySession::forwardResponse(RequestContext& contex
         auto writable = input_.prepare(limits_.read_chunk_bytes);
         armPhase(limits_.response_timeout, ProxyStopReason::ResponseTimeout);
         net::ErrorCode error;
-        const auto count =
-            co_await socket_.async_read_some(net::asio::buffer(writable.data(), writable.size()),
-                                             net::asio::redirect_error(net::use_awaitable, error));
+        const auto count = co_await connection_->socket().async_read_some(
+            net::asio::buffer(writable.data(), writable.size()),
+            net::asio::redirect_error(
+                net::asio::bind_executor(connection_->executor(), net::use_awaitable), error));
         phase_deadline_->disarm();
         if (error || count == 0) {
             if (stop_reason_ != ProxyStopReason::None) {
@@ -423,6 +443,12 @@ void ProxySession::cancel(ProxyStopReason reason) {
     auto self = shared_from_this();
     net::asio::dispatch(executor_, [self, reason] { self->cancelInExecutor(reason); });
 }
+UpstreamLease ProxySession::takeLease() {
+    if (!lease_) return {};
+    auto lease = std::move(*lease_);
+    lease_.reset();
+    return lease;
+}
 ProxyState ProxySession::state() const noexcept {
     return state_;
 }
@@ -442,10 +468,7 @@ void ProxySession::cancelInExecutor(ProxyStopReason reason) {
     if (stop_reason_ != ProxyStopReason::None) return;
     stop_reason_ = reason;
     state_ = ProxyState::Cancelled;
-    resolver_.cancel();
-    net::ErrorCode ignored;
-    socket_.cancel(ignored);
-    socket_.close(ignored);
+    connection_->cancelAndClose();
 }
 ProxyError ProxySession::errorForStopReason() const noexcept {
     switch (stop_reason_) {
@@ -474,14 +497,61 @@ ReverseProxy::ReverseProxy(std::vector<UpstreamEndpoint> upstreams, ProxyLimits 
     for (const auto& upstream : state_->upstreams)
         if (upstream.host.empty() || upstream.service.empty())
             throw std::invalid_argument("upstream endpoint requires host and service");
+    state_->health = std::make_shared<HealthStateStore>(state_->limits.health_thresholds);
+    for (const auto& upstream : state_->upstreams) {
+        state_->health->addEndpoint(upstream.host + ":" + upstream.service);
+    }
+}
+
+std::shared_ptr<UpstreamPool> ReverseProxy::State::poolFor(std::size_t index,
+                                                           net::asio::any_io_executor executor) {
+    std::scoped_lock lock(pools_mutex);
+    if (pools.empty()) pools.resize(upstreams.size());
+    if (!pools[index]) {
+        pools[index] = std::make_shared<UpstreamPool>(std::move(executor), upstreams[index],
+                                                      limits.pool_limits);
+    }
+    return pools[index];
+}
+
+std::shared_ptr<HealthStateStore> ReverseProxy::health() const noexcept {
+    return state_->health;
+}
+
+void ReverseProxy::stop() const {
+    std::vector<std::shared_ptr<UpstreamPool>> pools;
+    {
+        std::scoped_lock lock(state_->pools_mutex);
+        pools = state_->pools;
+    }
+    for (const auto& pool : pools)
+        if (pool) pool->stop();
 }
 
 net::Awaitable<HttpResponse> ReverseProxy::operator()(RequestContext& context,
                                                       HttpRequest request) const {
-    const auto index =
-        state_->next.fetch_add(1, std::memory_order_relaxed) % state_->upstreams.size();
-    auto session =
-        std::make_shared<ProxySession>(context.executor, state_->upstreams[index], state_->limits);
+    std::optional<std::size_t> index;
+    for (std::size_t attempt = 0; attempt < state_->upstreams.size(); ++attempt) {
+        const auto candidate =
+            state_->next.fetch_add(1, std::memory_order_relaxed) % state_->upstreams.size();
+        const auto& endpoint = state_->upstreams[candidate];
+        if (state_->health->isHealthy(endpoint.host + ":" + endpoint.service)) {
+            index = candidate;
+            break;
+        }
+    }
+    if (!index) {
+        co_return makeProxyErrorResponse(ProxyError::NoHealthyUpstream);
+    }
+    const auto pool = state_->poolFor(*index, context.executor);
+    net::ErrorCode acquire_error;
+    auto lease =
+        co_await pool->asyncAcquire(net::asio::redirect_error(net::use_awaitable, acquire_error));
+    if (acquire_error || !lease.valid()) {
+        co_return makeProxyErrorResponse(ProxyError::NoHealthyUpstream);
+    }
+    auto session = std::make_shared<ProxySession>(context.executor, state_->upstreams[*index],
+                                                  state_->limits, std::move(lease));
     if (context.set_current_proxy) {
         context.set_current_proxy(session);
     }
@@ -490,6 +560,23 @@ net::Awaitable<HttpResponse> ReverseProxy::operator()(RequestContext& context,
                             : co_await session->forward(context, std::move(request));
     if (context.set_current_proxy) {
         context.set_current_proxy({});
+    }
+    auto returned_lease = session->takeLease();
+    if (returned_lease.valid()) {
+        if (result.error == ProxyError::None && result.reusable) {
+            pool->releaseReusable(std::move(returned_lease));
+        } else {
+            pool->discard(std::move(returned_lease), DiscardReason::ProtocolError);
+        }
+    }
+    const auto& endpoint = state_->upstreams[*index];
+    const auto id = endpoint.host + ":" + endpoint.service;
+    if (result.error == ProxyError::None &&
+        (!state_->limits.count_5xx_as_health_failure || result.upstream_status < 500)) {
+        state_->health->recordSuccess(id);
+    } else if (result.error != ProxyError::Cancelled &&
+               result.error != ProxyError::UnsupportedRequest) {
+        state_->health->recordFailure(id);
     }
     co_return result.error == ProxyError::None ? result.response
                                                : makeProxyErrorResponse(result.error);

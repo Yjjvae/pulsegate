@@ -36,6 +36,7 @@ TEST(ReverseProxyTest, RewritesRequestAndStripsHopByHopHeaders) {
     EXPECT_NE(bytes.find("X-Forwarded-For: 192.0.2.9\r\n"), std::string::npos);
     EXPECT_NE(bytes.find("X-Request-Id: request-42\r\n"), std::string::npos);
     EXPECT_NE(bytes.find("Content-Length: 2\r\n"), std::string::npos);
+    EXPECT_NE(bytes.find("Connection: keep-alive\r\n"), std::string::npos);
     EXPECT_EQ(bytes.find("keep-alive:"), std::string::npos);
     EXPECT_EQ(bytes.find("x-remove:"), std::string::npos);
     EXPECT_EQ(bytes.find("spoofed"), std::string::npos);
@@ -52,6 +53,20 @@ TEST(ReverseProxyTest, MapsStructuredErrorsWithoutLeakingTransportDetails) {
 TEST(ReverseProxyTest, RequiresAtLeastOneWellFormedUpstream) {
     EXPECT_THROW((ReverseProxy({}, {})), std::invalid_argument);
     EXPECT_THROW((ReverseProxy({UpstreamEndpoint{}}, {})), std::invalid_argument);
+}
+
+TEST(ReverseProxyTest, BuildsHealthSnapshotUsingConfiguredThresholds) {
+    ProxyLimits limits;
+    limits.health_thresholds = {.healthy_threshold = 1, .unhealthy_threshold = 1};
+    ReverseProxy proxy({UpstreamEndpoint{.host = "backend.local", .service = "8081"}}, limits);
+    const auto health = proxy.health();
+    health->recordFailure("backend.local:8081");
+    EXPECT_FALSE(health->isHealthy("backend.local:8081"));
+
+    limits.health_thresholds.healthy_threshold = 0;
+    EXPECT_THROW(
+        (ReverseProxy({UpstreamEndpoint{.host = "backend.local", .service = "8081"}}, limits)),
+        std::invalid_argument);
 }
 
 }  // namespace
