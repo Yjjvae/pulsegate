@@ -8,6 +8,7 @@
 #include <boost/asio/write.hpp>
 #include <boost/system/system_error.hpp>
 #include <charconv>
+#include <chrono>
 #include <cstddef>
 #include <stdexcept>
 #include <string>
@@ -23,6 +24,8 @@ namespace {
 namespace asio = boost::asio;
 using tcp = asio::ip::tcp;
 using pulsegate::http::HttpServer;
+using pulsegate::http::SessionLimits;
+using pulsegate::http::StopReason;
 using pulsegate::net::ListenConfig;
 
 constexpr std::string_view kHealthRequest =
@@ -30,7 +33,8 @@ constexpr std::string_view kHealthRequest =
 
 class RunningServer {
    public:
-    RunningServer() : server_(context_, ListenConfig{.host = "127.0.0.1", .port = 0}) {
+    explicit RunningServer(SessionLimits limits = {})
+        : server_(context_, ListenConfig{.host = "127.0.0.1", .port = 0}, {}, limits) {
         server_.start();
         thread_ = std::jthread([this] { context_.run(); });
     }
@@ -57,12 +61,44 @@ class RunningServer {
             thread_.join();
         }
     }
+    [[nodiscard]] std::size_t connectionCount() const {
+        return server_.connectionCount();
+    }
+    [[nodiscard]] std::size_t closedCount(StopReason reason) const {
+        return server_.closedCount(reason);
+    }
 
    private:
     asio::io_context context_{1};
     HttpServer server_;
     std::jthread thread_;
 };
+
+SessionLimits shortTimeoutLimits() {
+    SessionLimits limits;
+    limits.header_timeout = std::chrono::milliseconds(30);
+    limits.body_timeout = std::chrono::milliseconds(30);
+    limits.idle_timeout = std::chrono::milliseconds(30);
+    return limits;
+}
+
+boost::system::error_code waitForClose(tcp::socket& socket) {
+    std::array<char, 64> storage{};
+    boost::system::error_code error;
+    [[maybe_unused]] const auto count = socket.read_some(asio::buffer(storage), error);
+    return error;
+}
+
+template <typename Predicate>
+bool waitUntil(Predicate&& predicate) {
+    for (int attempt = 0; attempt < 100; ++attempt) {
+        if (predicate()) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return predicate();
+}
 
 class ResponseReader {
    public:
@@ -279,6 +315,81 @@ TEST(AsyncHttpServerTest, OperationsWaitUntilIoContextRuns) {
 
     server.stop();
     server_thread.join();
+}
+
+TEST(AsyncHttpServerTest, ReclaimsSlowIncompleteHeaderWithHeaderTimeout) {
+    RunningServer server(shortTimeoutLimits());
+    asio::io_context client_context;
+    tcp::socket client(client_context);
+    client.connect(server.endpoint());
+    asio::write(client, asio::buffer("GET /healthz HTTP/1.1\r\nHo"));
+
+    EXPECT_TRUE(waitForClose(client));
+    EXPECT_TRUE(
+        waitUntil([&server] { return server.closedCount(StopReason::HeaderTimeout) == 1U; }));
+    EXPECT_EQ(server.connectionCount(), 0U);
+}
+
+TEST(AsyncHttpServerTest, ReclaimsIncompleteBodyWithBodyTimeout) {
+    RunningServer server(shortTimeoutLimits());
+    asio::io_context client_context;
+    tcp::socket client(client_context);
+    client.connect(server.endpoint());
+    asio::write(client, asio::buffer("POST /healthz HTTP/1.1\r\nHost: localhost\r\n"
+                                     "Content-Length: 4\r\n\r\nx"));
+
+    EXPECT_TRUE(waitForClose(client));
+    EXPECT_TRUE(waitUntil([&server] { return server.closedCount(StopReason::BodyTimeout) == 1U; }));
+    EXPECT_EQ(server.connectionCount(), 0U);
+}
+
+TEST(AsyncHttpServerTest, ReclaimsKeepAliveConnectionWithIdleTimeout) {
+    RunningServer server(shortTimeoutLimits());
+    asio::io_context client_context;
+    tcp::socket client(client_context);
+    client.connect(server.endpoint());
+    constexpr std::string_view request = "GET /healthz HTTP/1.1\r\nHost: localhost\r\n\r\n";
+    asio::write(client, asio::buffer(request));
+
+    ResponseReader reader(client);
+    EXPECT_NE(reader.readResponse().find("HTTP/1.1 200 OK\r\n"), std::string::npos);
+    EXPECT_TRUE(waitForClose(client));
+    EXPECT_TRUE(waitUntil([&server] { return server.closedCount(StopReason::IdleTimeout) == 1U; }));
+    EXPECT_EQ(server.connectionCount(), 0U);
+}
+
+TEST(AsyncHttpServerTest, StopWinsOverPendingTimeoutAndClosesOnlyOnce) {
+    RunningServer server(shortTimeoutLimits());
+    asio::io_context client_context;
+    tcp::socket client(client_context);
+    client.connect(server.endpoint());
+    asio::write(client, asio::buffer("GET /healthz HTTP/1.1\r\nHo"));
+    ASSERT_TRUE(waitUntil([&server] { return server.connectionCount() == 1U; }));
+
+    server.stop();
+    EXPECT_TRUE(waitForClose(client));
+    EXPECT_TRUE(
+        waitUntil([&server] { return server.closedCount(StopReason::ServerShutdown) == 1U; }));
+    EXPECT_EQ(server.connectionCount(), 0U);
+    EXPECT_EQ(server.closedCount(StopReason::HeaderTimeout), 0U);
+}
+
+TEST(AsyncHttpServerTest, EnforcesConnectionLimitAndRecordsResourceRejection) {
+    auto limits = shortTimeoutLimits();
+    limits.max_connections = 1;
+    RunningServer server(limits);
+    asio::io_context client_context;
+    tcp::socket first(client_context);
+    tcp::socket second(client_context);
+    first.connect(server.endpoint());
+    asio::write(first, asio::buffer("G"));
+    ASSERT_TRUE(waitUntil([&server] { return server.connectionCount() == 1U; }));
+    second.connect(server.endpoint());
+
+    EXPECT_TRUE(waitForClose(second));
+    EXPECT_EQ(server.connectionCount(), 1U);
+    EXPECT_EQ(server.closedCount(StopReason::ResourceLimit), 1U);
+    first.close();
 }
 
 }  // namespace

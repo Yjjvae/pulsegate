@@ -1,5 +1,6 @@
 #include "pulsegate/http/http_server.h"
 
+#include <atomic>
 #include <boost/asio/dispatch.hpp>
 #include <boost/asio/write.hpp>
 #include <boost/system/system_error.hpp>
@@ -10,6 +11,7 @@
 #include <utility>
 
 #include "pulsegate/runtime/coroutine_guard.h"
+#include "pulsegate/runtime/scope_exit.h"
 
 namespace pulsegate::http {
 namespace {
@@ -57,22 +59,137 @@ void logCoroutineFailure(std::string_view operation, std::exception_ptr error) {
     }
 }
 
+bool isPositive(std::chrono::milliseconds value) {
+    return value > std::chrono::milliseconds::zero();
+}
+
 }  // namespace
 
-HttpSession::HttpSession(net::tcp::socket socket, RequestHandler handler, SessionLimits limits)
+const char* toString(StopReason reason) noexcept {
+    switch (reason) {
+        case StopReason::None:
+            return "none";
+        case StopReason::PeerClosed:
+            return "peer_closed";
+        case StopReason::ProtocolError:
+            return "protocol_error";
+        case StopReason::HeaderTimeout:
+            return "header_timeout";
+        case StopReason::BodyTimeout:
+            return "body_timeout";
+        case StopReason::IdleTimeout:
+            return "idle_timeout";
+        case StopReason::ServerShutdown:
+            return "server_shutdown";
+        case StopReason::ResourceLimit:
+            return "resource_limit";
+        case StopReason::InternalError:
+            return "internal_error";
+    }
+    return "unknown";
+}
+
+SessionRegistry::SessionRegistry(std::size_t maximum_sessions)
+    : maximum_sessions_(maximum_sessions) {
+    if (maximum_sessions_ == 0) {
+        throw std::invalid_argument("session registry requires a positive connection limit");
+    }
+}
+
+bool SessionRegistry::tryAdd(SessionId id, const std::shared_ptr<HttpSession>& session) {
+    std::scoped_lock lock(mutex_);
+    pruneExpiredLocked();
+    if (draining_ || sessions_.size() >= maximum_sessions_) {
+        return false;
+    }
+    return sessions_.emplace(id, session).second;
+}
+
+void SessionRegistry::recordRejected(StopReason reason) {
+    std::scoped_lock lock(mutex_);
+    ++closed_counts_[reason];
+}
+
+void SessionRegistry::remove(SessionId id, StopReason reason) {
+    std::scoped_lock lock(mutex_);
+    if (sessions_.erase(id) != 0) {
+        ++closed_counts_[reason];
+    }
+}
+
+void SessionRegistry::beginDrain() {
+    {
+        std::scoped_lock lock(mutex_);
+        draining_ = true;
+    }
+    for (const auto& session : liveSessions()) {
+        session->beginDrain();
+    }
+}
+
+void SessionRegistry::forceCloseAll() {
+    for (const auto& session : liveSessions()) {
+        session->stop(StopReason::ServerShutdown);
+    }
+}
+
+std::size_t SessionRegistry::size() const {
+    std::scoped_lock lock(mutex_);
+    const_cast<SessionRegistry*>(this)->pruneExpiredLocked();
+    return sessions_.size();
+}
+
+std::size_t SessionRegistry::closedCount(StopReason reason) const {
+    std::scoped_lock lock(mutex_);
+    const auto iterator = closed_counts_.find(reason);
+    return iterator == closed_counts_.end() ? 0 : iterator->second;
+}
+
+std::vector<std::shared_ptr<HttpSession>> SessionRegistry::liveSessions() {
+    std::vector<std::shared_ptr<HttpSession>> result;
+    std::scoped_lock lock(mutex_);
+    for (auto iterator = sessions_.begin(); iterator != sessions_.end();) {
+        if (auto session = iterator->second.lock()) {
+            result.push_back(std::move(session));
+            ++iterator;
+        } else {
+            iterator = sessions_.erase(iterator);
+        }
+    }
+    return result;
+}
+
+void SessionRegistry::pruneExpiredLocked() {
+    for (auto iterator = sessions_.begin(); iterator != sessions_.end();) {
+        if (iterator->second.expired()) {
+            iterator = sessions_.erase(iterator);
+        } else {
+            ++iterator;
+        }
+    }
+}
+
+HttpSession::HttpSession(net::tcp::socket socket, RequestHandler handler,
+                         std::shared_ptr<SessionRegistry> registry, SessionId id,
+                         SessionLimits limits)
     : socket_(std::move(socket)),
       handler_(std::move(handler)),
       limits_(limits),
       input_(limits_.read_chunk_bytes, limits_.max_buffer_bytes),
-      parser_(limits_.parser) {
-    if (!handler_) {
-        throw std::invalid_argument("HTTP session requires a request handler");
+      parser_(limits_.parser),
+      registry_(std::move(registry)),
+      id_(id),
+      deadline_(std::make_shared<net::Deadline>(socket_.get_executor())) {
+    if (!handler_ || !registry_) {
+        throw std::invalid_argument("HTTP session requires a handler and session registry");
     }
     if (limits_.read_chunk_bytes == 0 || limits_.max_buffer_bytes < limits_.read_chunk_bytes ||
         limits_.max_buffer_bytes < limits_.parser.max_header_bytes ||
         limits_.max_buffer_bytes - limits_.parser.max_header_bytes <
-            limits_.parser.max_body_bytes) {
-        throw std::invalid_argument("session buffer cannot satisfy configured parser limits");
+            limits_.parser.max_body_bytes ||
+        !isPositive(limits_.header_timeout) || !isPositive(limits_.body_timeout) ||
+        !isPositive(limits_.idle_timeout)) {
+        throw std::invalid_argument("HTTP session limits are outside safe bounds");
     }
 }
 
@@ -82,36 +199,56 @@ void HttpSession::start() {
         socket_.get_executor(), "http_session",
         [self]() -> net::Awaitable<void> { co_await self->run(); },
         [self](std::string_view operation, std::exception_ptr error) {
-            self->close();
+            self->closeInExecutor(StopReason::InternalError);
             logCoroutineFailure(operation, error);
         });
 }
 
-void HttpSession::stop() {
+void HttpSession::stop(StopReason reason) {
     const auto self = shared_from_this();
-    net::asio::dispatch(socket_.get_executor(), [self] {
-        self->stopping_ = true;
-        self->close();
-    });
+    net::asio::dispatch(socket_.get_executor(), [self, reason] { self->stopInExecutor(reason); });
+}
+
+void HttpSession::beginDrain() {
+    const auto self = shared_from_this();
+    net::asio::dispatch(socket_.get_executor(), [self] { self->beginDrainInExecutor(); });
+}
+
+SessionState HttpSession::state() const noexcept {
+    return state_;
+}
+
+StopReason HttpSession::stopReason() const noexcept {
+    return stop_reason_;
 }
 
 net::Awaitable<void> HttpSession::run() {
-    while (!stopping_) {
+    // A member coroutine stores only `this`; keep the Session alive across its
+    // suspension points rather than relying on the weak registry or timer.
+    [[maybe_unused]] const auto self = shared_from_this();
+    if (state_ == SessionState::Created) {
+        state_ = SessionState::Running;
+    }
+    while (state_ == SessionState::Running || state_ == SessionState::Draining) {
         auto request = co_await readRequest();
-        if (!request) {
+        if (!request || state_ == SessionState::Closing || state_ == SessionState::Closed) {
             break;
         }
 
         auto response = handler_(*request);
         const bool close_after_response = response.close_connection || !request->keepAlive();
         co_await writeResponse(response, request->method == HttpMethod::Head);
-        if (close_after_response) {
+        served_request_ = true;
+        if (close_after_response || state_ == SessionState::Draining ||
+            state_ == SessionState::Closing || state_ == SessionState::Closed) {
             break;
         }
         parser_.reset();
     }
 
-    close();
+    if (state_ != SessionState::Closed) {
+        closeInExecutor(stop_reason_ == StopReason::None ? StopReason::PeerClosed : stop_reason_);
+    }
 }
 
 net::Awaitable<std::optional<HttpRequest>> HttpSession::readRequest() {
@@ -121,20 +258,33 @@ net::Awaitable<std::optional<HttpRequest>> HttpSession::readRequest() {
             co_return parser_.takeRequest();
         }
         if (result != ParseResult::NeedMore) {
+            stop_reason_ = StopReason::ProtocolError;
             co_await writeParserError(result);
-            stopping_ = true;
             co_return std::nullopt;
         }
 
         auto writable = input_.prepare(limits_.read_chunk_bytes);
+        armReadDeadline();
+        reading_ = true;
+        const auto cleanup = runtime::makeScopeExit([this] {
+            reading_ = false;
+            deadline_->disarm();
+        });
+
         net::ErrorCode error;
         const auto count =
             co_await socket_.async_read_some(net::asio::buffer(writable.data(), writable.size()),
                                              net::asio::redirect_error(net::use_awaitable, error));
         if (error) {
+            if (stop_reason_ == StopReason::None) {
+                stop_reason_ = StopReason::PeerClosed;
+            }
             co_return std::nullopt;
         }
         if (count == 0) {
+            if (stop_reason_ == StopReason::None) {
+                stop_reason_ = StopReason::PeerClosed;
+            }
             co_return std::nullopt;
         }
         input_.commit(count);
@@ -146,8 +296,8 @@ net::Awaitable<void> HttpSession::writeResponse(const HttpResponse& response, bo
     net::ErrorCode error;
     co_await net::asio::async_write(socket_, net::asio::buffer(bytes),
                                     net::asio::redirect_error(net::use_awaitable, error));
-    if (error) {
-        stopping_ = true;
+    if (error && stop_reason_ == StopReason::None) {
+        stop_reason_ = StopReason::PeerClosed;
     }
 }
 
@@ -155,17 +305,66 @@ net::Awaitable<void> HttpSession::writeParserError(ParseResult result) {
     co_await writeResponse(makeErrorResponse(result), false);
 }
 
-void HttpSession::close() {
-    if (!socket_.is_open()) {
+void HttpSession::armReadDeadline() {
+    StopReason reason = StopReason::HeaderTimeout;
+    auto timeout = limits_.header_timeout;
+    if (parser_.state() == ParseState::Body) {
+        reason = StopReason::BodyTimeout;
+        timeout = limits_.body_timeout;
+    } else if (served_request_ && parser_.state() == ParseState::RequestLine &&
+               input_.readableBytes() == 0) {
+        reason = StopReason::IdleTimeout;
+        timeout = limits_.idle_timeout;
+    }
+
+    deadline_->arm(timeout, [weak = weak_from_this(), reason] {
+        if (auto self = weak.lock()) {
+            self->stopInExecutor(reason);
+        }
+    });
+}
+
+void HttpSession::stopInExecutor(StopReason reason) {
+    closeInExecutor(reason);
+}
+
+void HttpSession::beginDrainInExecutor() {
+    if (state_ == SessionState::Closing || state_ == SessionState::Closed) {
         return;
     }
+    state_ = SessionState::Draining;
+    // A slow client must not keep shutdown alive. An in-flight write is left
+    // alone so an already accepted request can receive its response.
+    if (reading_) {
+        closeInExecutor(StopReason::ServerShutdown);
+    }
+}
+
+void HttpSession::closeInExecutor(StopReason reason) {
+    if (state_ == SessionState::Closed || state_ == SessionState::Closing) {
+        return;
+    }
+    state_ = SessionState::Closing;
+    if (stop_reason_ == StopReason::None) {
+        stop_reason_ = reason;
+    }
+    deadline_->disarm();
+
     net::ErrorCode ignored;
+    socket_.cancel(ignored);
     socket_.shutdown(net::tcp::socket::shutdown_both, ignored);
     socket_.close(ignored);
+
+    state_ = SessionState::Closed;
+    if (!close_recorded_) {
+        close_recorded_ = true;
+        registry_->remove(id_, stop_reason_);
+    }
 }
 
 HttpServer::HttpServer(net::asio::io_context& context, net::ListenConfig config,
-                       RequestHandler handler, SessionLimits limits) {
+                       RequestHandler handler, SessionLimits limits)
+    : registry_(std::make_shared<SessionRegistry>(limits.max_connections)) {
     if (!handler) {
         handler = defaultHandler;
     }
@@ -176,10 +375,21 @@ HttpServer::HttpServer(net::asio::io_context& context, net::ListenConfig config,
         throw boost::system::system_error(error, "parse HTTP server listen address");
     }
 
+    auto next_session_id = std::make_shared<std::atomic<SessionId>>(1);
     listener_ = std::make_shared<net::Listener>(
         context, endpoint, config.backlog,
-        [handler = std::move(handler), limits](net::tcp::socket socket) {
-            std::make_shared<HttpSession>(std::move(socket), handler, limits)->start();
+        [handler = std::move(handler), limits, registry = registry_,
+         next_session_id](net::tcp::socket socket) {
+            const auto id = next_session_id->fetch_add(1, std::memory_order_relaxed);
+            auto session =
+                std::make_shared<HttpSession>(std::move(socket), handler, registry, id, limits);
+            if (registry->tryAdd(id, session)) {
+                session->start();
+            } else {
+                net::ErrorCode ignored;
+                socket.close(ignored);
+                registry->recordRejected(StopReason::ResourceLimit);
+            }
         },
         [](std::string_view operation, std::exception_ptr exception) {
             logCoroutineFailure(operation, exception);
@@ -192,10 +402,19 @@ void HttpServer::start() {
 
 void HttpServer::stop() {
     listener_->stop();
+    registry_->beginDrain();
 }
 
 net::tcp::endpoint HttpServer::localEndpoint() const {
     return listener_->localEndpoint();
+}
+
+std::size_t HttpServer::connectionCount() const {
+    return registry_->size();
+}
+
+std::size_t HttpServer::closedCount(StopReason reason) const {
+    return registry_->closedCount(reason);
 }
 
 HttpResponse HttpServer::defaultHandler(const HttpRequest& request) {

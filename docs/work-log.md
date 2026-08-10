@@ -308,6 +308,51 @@
 - 多线程 `io_context`、业务路由和完整 HTTP/1.1 chunked 解析尚未引入；
 - 基准结果必须来自 Release 可执行程序，不能用 Debug 或同步基线替代。
 
+## 2026-08-10
+
+### 第九章：超时、取消与连接生命周期
+
+完成内容：
+
+- 新增 `net::Deadline`：基于 `steady_timer`、generation ticket 和共享所有权，旧的
+  `async_wait` 即使在取消后恢复，也不会误取消下一次读操作；
+- 新增 `ScopeExit`，保证读协程无论正常完成、网络错误或因取消返回都会 disarm deadline；
+- 为 `HttpSession` 建立 `Created → Running/Draining → Closing → Closed` 生命周期和
+  唯一的 `StopReason`；关闭只执行一次，并依次取消 timer、cancel/shutdown/close socket、
+  从 Registry 移除并记录原因；
+- 为 Header、`Content-Length` Body 和 Keep-Alive 空闲读分别配置期限，默认值为
+  10 秒、30 秒和 15 秒；
+- 新增 mutex 保护的弱引用 `SessionRegistry`，支持连接上限、统一 drain、强制关闭和
+  关闭原因计数；
+- `HttpServer::stop()` 先停止 Listener，再请求 Session drain。正在读的慢客户端以
+  `ServerShutdown` 取消，已开始响应的请求在写完后关闭；主程序收到信号后不再直接
+  `io_context.stop()`，而是让取消处理与清理 handler 正常执行；
+- 项目开发版本升级到 `0.3.0`，新增 2 个 Deadline 单元测试和 5 个回环集成测试。
+
+验证结果：
+
+- Debug 完整 CTest：49/49 通过；
+- 定向覆盖：Header timeout、Body timeout、Idle timeout、stop/timeout 竞争、连接上限、
+  Deadline disarm 和重新 arm；
+- 已使用 `std::string_view` 写入无 `Connection: close` 的测试请求，避免 C 字符串数组
+  末尾的 `NUL` 被 `asio::buffer` 当作额外协议字节，从而误分类为 Header timeout。
+
+重要决策：
+
+- `HttpSession::run()` 在协程帧中显式持有 `shared_ptr<HttpSession>`：成员协程自身只保存
+  裸 `this`，不能把 Registry 的 `weak_ptr` 当作生命周期保证；
+- Registry 不强持有 Session，避免结束连接被容器意外延长寿命；线程安全由 Mutex 提供，
+  为第十章多线程 `io_context` 保留边界；
+- 协议 deadline 使用 `steady_clock`，不依赖会跳变的 wall clock；
+- 资源上限拒绝发生在 accept 后、Session 启动前：直接关闭 socket 并记录
+  `ResourceLimit`，不为未解析请求伪造 HTTP 响应。
+
+遗留事项：
+
+- 第十章将引入多线程 `io_context`、工作线程管理和更严格的 strand 验证；
+- 目前没有写操作 deadline；反向代理和上游 DNS/连接/响应期限会在引入上游客户端后实现；
+- 发布 `v0.3.0` 标签、PR 合并和 CI 检查将在本阶段工程收尾时完成。
+
 ## 后续记录模板
 
 ```markdown

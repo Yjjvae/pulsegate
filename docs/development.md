@@ -122,3 +122,40 @@ printf 'GET /healthz HTTP/1.1\r\nHost: localhost\r\n\r\nGET /healthz HTTP/1.1\r\
 - ASan/UBSan 没有报告内存错误或未定义行为。
 
 性能基准及环境信息记录在 [v0.2.0 单线程基线](benchmarks/v0.2.0-single-thread.md)。
+
+## 阶段 3：超时、取消与连接生命周期验收
+
+```bash
+cmake --preset debug
+cmake --build --preset debug
+ctest --preset debug --output-on-failure
+
+cmake --preset asan
+cmake --build --preset asan
+ctest --preset asan --output-on-failure
+
+cmake --preset tsan
+cmake --build --preset tsan
+ctest --preset tsan --output-on-failure
+```
+
+第 9 章新增的定向测试可以单独运行：
+
+```bash
+ctest --test-dir build/debug -R 'DeadlineTest|AsyncHttpServerTest.(Reclaims|StopWins|Enforces)' \
+  --output-on-failure
+```
+
+预期结果：
+
+- `Deadline` 的 `disarm()` 和重新 `arm()` 不会让旧 timer 触发新读操作；
+- 慢速不完整 Header、未完成的 `Content-Length` Body 与已响应的 Keep-Alive
+  分别以 `HeaderTimeout`、`BodyTimeout`、`IdleTimeout` 关闭；
+- `HttpServer::stop()` 先停止 Listener，再 drain Session；正在读的慢客户端以
+  `ServerShutdown` 取消，已开始写响应的请求可完成后再关闭；
+- `SessionRegistry` 使用弱引用追踪存活连接，连接关闭只记一次原因，并拒绝超过
+  `SessionLimits::max_connections` 的新连接；
+- 测试结束后 Registry 的连接数回到零，`io_context.run()` 能自然返回。
+
+本阶段的默认期限是 Header 10 秒、Body 30 秒、Keep-Alive 空闲 15 秒。它们由
+`SessionLimits` 配置；测试使用 30 毫秒的局部配置，生产服务不应照搬这个值。
