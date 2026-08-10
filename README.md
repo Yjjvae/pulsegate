@@ -2,9 +2,9 @@
 
 PulseGate 是一个用 C++20 和 Boost.Asio 逐步实现的 HTTP 网关学习项目。
 
-当前开发进度是教程第 8 章“单线程 Boost.Asio 协程服务器”；最近一个发布标签
-是同步基线的 `v0.1.0`。当前主程序能在一个 `io_context` 线程上管理多个连接，
-但这仍是异步正确性基线，不是多线程性能版本。
+当前开发进度是教程第 9 章“超时、取消与连接生命周期”。当前开发版本为
+`0.3.0`；最近发布标签为第 8 章的 `v0.2.0`。当前主程序能在一个 `io_context`
+线程上管理多个连接，但这仍是异步正确性基线，不是多线程性能版本。
 
 完整教学见 [PROJECT_TUTORIAL.md](PROJECT_TUTORIAL.md)。
 
@@ -20,6 +20,8 @@ PulseGate 是一个用 C++20 和 Boost.Asio 逐步实现的 HTTP 网关学习项
 - 支持分段输入、`Content-Length`、Keep-Alive 与顺序 Pipelining 的 HTTP/1.1 解析器；
 - 安全 Header 处理、响应序列化，以及 400、405、413、431、501 错误映射；
 - 单线程 C++20 Coroutine Listener/Session，慢客户端不会阻塞其他连接；
+- generation-safe `steady_timer` Deadline，以及 Header、Body 和 Keep-Alive 空闲超时；
+- 带唯一 `StopReason` 的 Session 状态机、连接注册表、连接上限和优雅 drain；
 - GoogleTest + CTest；
 - Debug、Release、ASan/UBSan、TSan 独立预设；
 - clang-format、clang-tidy 与 GitHub 协作模板。
@@ -71,7 +73,8 @@ curl --noproxy '*' --include http://127.0.0.1:8080/healthz
 ```
 
 预期 Body 为 `ok`。当前支持 HTTP/1.0、HTTP/1.1、`Content-Length`、Keep-Alive 和
-顺序处理的 Pipelining；暂不支持 chunked 请求、超时或多线程 I/O。
+顺序处理的 Pipelining；慢 Header、慢 Body 和空闲 Keep-Alive 会按期限关闭。
+暂不支持 chunked 请求或多线程 I/O。
 
 第 6 章同步基线仍保留为独立学习程序：
 

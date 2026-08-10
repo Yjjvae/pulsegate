@@ -91,10 +91,7 @@ int main(int argc, char* argv[]) {
                   << endpoint.port() << '\n';
 
         boost::asio::signal_set signals(context, SIGINT, SIGTERM);
-        signals.async_wait([&server, &context](const boost::system::error_code&, int) {
-            server.stop();
-            context.stop();
-        });
+        signals.async_wait([&server](const boost::system::error_code&, int) { server.stop(); });
         server.start();
         context.run();
     } catch (const std::exception& error) {

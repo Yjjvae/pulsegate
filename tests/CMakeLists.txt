@@ -5,6 +5,7 @@ target_sources(
   PRIVATE
     unit/buffer_test.cpp
     unit/http_parser_test.cpp
+    unit/deadline_test.cpp
     unit/smoke_test.cpp
 )
 target_link_libraries(

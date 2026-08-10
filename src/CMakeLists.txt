@@ -51,6 +51,7 @@ target_sources(
   pulsegate_net
   PRIVATE
     net/buffer.cpp
+    net/deadline.cpp
     net/endpoint.cpp
     net/listener.cpp
     net/sync_http_server.cpp
