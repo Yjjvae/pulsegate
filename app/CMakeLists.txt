@@ -9,6 +9,7 @@ target_link_libraries(
   pulsegate
   PRIVATE
     PulseGate::core
+    PulseGate::http
 )
 
 add_executable(pulsegate_sync_baseline)

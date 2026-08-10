@@ -1,23 +1,20 @@
-#include "pulsegate/core/version.h"
+#include <gtest/gtest.h>
 
+#include <atomic>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/post.hpp>
 
-#include <atomic>
-
-#include <gtest/gtest.h>
+#include "pulsegate/core/version.h"
 
 TEST(CoreSmokeTest, ReportsProjectVersion) {
-    EXPECT_EQ(pulsegate::core::version(), "0.0.1");
+    EXPECT_EQ(pulsegate::core::version(), "0.2.0");
 }
 
 TEST(AsioSmokeTest, ExecutesPostedHandler) {
     boost::asio::io_context context;
     std::atomic_bool called{false};
 
-    boost::asio::post(context, [&called] {
-        called.store(true, std::memory_order_relaxed);
-    });
+    boost::asio::post(context, [&called] { called.store(true, std::memory_order_relaxed); });
 
     context.run();
 
