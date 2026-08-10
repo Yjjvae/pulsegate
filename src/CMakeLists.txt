@@ -50,7 +50,9 @@ add_library(PulseGate::net ALIAS pulsegate_net)
 target_sources(
   pulsegate_net
   PRIVATE
+    net/buffer.cpp
     net/endpoint.cpp
+    net/listener.cpp
     net/sync_http_server.cpp
 )
 target_include_directories(
@@ -63,4 +65,28 @@ target_link_libraries(
   pulsegate_net
   PUBLIC
     PulseGate::runtime
+)
+
+add_library(pulsegate_http STATIC)
+add_library(PulseGate::http ALIAS pulsegate_http)
+
+target_sources(
+  pulsegate_http
+  PRIVATE
+    http/headers.cpp
+    http/http_parser.cpp
+    http/http_request.cpp
+    http/http_response.cpp
+    http/http_server.cpp
+)
+target_include_directories(
+  pulsegate_http
+  PUBLIC
+    "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>"
+    "$<INSTALL_INTERFACE:include>"
+)
+target_link_libraries(
+  pulsegate_http
+  PUBLIC
+    PulseGate::net
 )
