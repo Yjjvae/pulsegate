@@ -5,6 +5,8 @@ target_sources(
   PRIVATE
     unit/buffer_test.cpp
     unit/http_parser_test.cpp
+    unit/router_test.cpp
+    unit/static_file_handler_test.cpp
     unit/deadline_test.cpp
     unit/asio_runtime_test.cpp
     unit/smoke_test.cpp

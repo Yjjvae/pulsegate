@@ -393,6 +393,46 @@
   blocking pool；
 - raw epoll 是可选面试实验，保持与主 Boost.Asio 工程分离。
 
+## 2026-08-10
+
+### 第十一章：异步路由与静态资源
+
+完成内容：
+
+- 新增不可变快照 `Router`：路由匹配不持全局锁，配置更新通过 copy-on-write 发布；支持精确
+  和前缀路由、404、405/Allow、请求 ID，以及 handler 异常到 500 的统一映射；
+- `HttpSession` 改为构造 `RequestContext` 并 `co_await Router::handle()`；在移动 Request 前
+  固定 Keep-Alive/HEAD 策略，避免移动后 Header 丢失导致连接关闭语义错误；
+- 默认注册 `/healthz`、`/livez`、`/readyz`、`/metrics`、`/api/version` 和 `POST /echo`；
+- 新增 `BoundedFileService`：专用 `asio::thread_pool`、原子队列上限、完成后投递回请求
+  executor；静态文件读取不阻塞 I/O worker，队列满映射 503；
+- 新增 `StaticFileHandler` 和 `--document-root PATH`：百分号解码、拒绝 NUL/反斜杠/`..`、
+  canonical root 检查、拒绝符号链接逃逸、常规文件/大小检查、MIME 与 403/404/413/503/500 映射；
+- 项目开发版本升级到 `0.5.0`，新增 Router、静态文件与默认异步路由测试。
+
+验证结果：
+
+- Debug 完整 CTest：64/64 通过；
+- 覆盖路由纯逻辑、延迟协程 handler、异常 500、默认 health/liveness/version/echo、文件服务
+  Busy、静态正常文件、编码 traversal、NUL、404；
+- Release 手工验证 `/livez`、`POST /echo`、`/static/index.txt` 都返回 200 与
+  `X-Request-Id`；`curl --path-as-is /static/%2e%2e/secret` 返回 403。
+- ASan/UBSan、TSan、Release 和 `-Werror` 验证在提交前运行。
+
+重要决策：
+
+- `RequestContext` 只在 handler 调用期间借用；下游 Session 以 `weak_ptr` 暴露，避免路由
+  handler 与 Session 形成生命周期环；
+- 文件候选路径的最终 canonical 与 regular-file 检查放在文件 worker 中，降低路径检查与
+  打开之间的 TOCTOU 暴露；
+- 该版本仍完整缓冲 256 KiB 内的静态文件；不把它描述为 sendfile 或流式大文件服务；
+- 默认应用不隐式暴露目录；只有传入 `--document-root` 才注册 `/static/*`。
+
+遗留事项：
+
+- 下一阶段实现协程式反向代理、上游响应解析和上游 deadline；
+- 静态文件的大文件流式传输、range、ETag、缓存控制及平台 sendfile adapter 暂不实现。
+
 ## 后续记录模板
 
 ```markdown

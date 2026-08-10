@@ -201,3 +201,43 @@ ctest --test-dir build/debug \
 
 `strand` 只保证关联 handler **不并发执行**，不保证固定在某个 OS 线程执行；它不能替代
 Registry、Metrics 或 Cache 等跨 Session 共享数据的同步策略。
+
+## 阶段 5：异步路由与静态资源验收
+
+```bash
+cmake --preset debug
+cmake --build --preset debug
+ctest --preset debug --output-on-failure
+
+ctest --test-dir build/debug \
+  -R 'RouterTest|StaticFileHandlerTest|AsyncHttpServerTest.ServesDefaultAsyncRoutes' \
+  --output-on-failure
+```
+
+手工准备一个非敏感目录并启动静态资源路由：
+
+```bash
+mkdir -p /tmp/pulsegate-public
+printf 'hello static\n' > /tmp/pulsegate-public/index.txt
+./build/debug/app/pulsegate --listen 127.0.0.1:8080 --threads 4 \
+  --document-root /tmp/pulsegate-public
+
+curl --noproxy '*' --include http://127.0.0.1:8080/livez
+curl --noproxy '*' --include http://127.0.0.1:8080/api/version
+curl --noproxy '*' --include -X POST --data-binary 'hello' http://127.0.0.1:8080/echo
+curl --noproxy '*' --include http://127.0.0.1:8080/static/index.txt
+curl --noproxy '*' --path-as-is --include http://127.0.0.1:8080/static/%2e%2e/secret
+```
+
+预期结果：
+
+- Router 匹配和 404/405 在无 socket 的单元测试中验证；每个响应都有 `X-Request-Id`；
+- `/livez` 返回 `alive\n`，`/readyz` 返回 `ready\n`，`POST /echo` 可接收拆分 Body；
+- handler 异常映射为 500，不会终止 `io_context` worker；
+- `/static/*` 在专用有界文件池读取，普通文件有 MIME、`Content-Length` 与 HEAD 语义；
+- `..`、`%2e%2e`、NUL、反斜杠和 root 外符号链接返回 403；不存在为 404、超限为 413、
+  文件队列满为 503；
+- 静态文件 root 在启动期校验，生产环境不要把项目根目录或用户主目录作为 document root。
+
+`curl` 默认会在请求发送前规范化部分路径；验证编码 `..` 时必须使用 `--path-as-is`，否则
+服务端看到的是已变成 `/secret` 的路径，得到 404 并不能证明 traversal 防护生效。

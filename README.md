@@ -2,9 +2,9 @@
 
 PulseGate 是一个用 C++20 和 Boost.Asio 逐步实现的 HTTP 网关学习项目。
 
-当前开发进度是教程第 10 章“多线程 `io_context` 与 strand”。当前开发版本为
-`0.4.0`；最近发布标签为第 9 章的 `v0.3.0`。主程序使用一个 `io_context` 和可配置
-数量的工作线程；每条 Session 仍有自己的 strand，因此并发不会让单条连接的状态并行修改。
+当前开发进度是教程第 11 章“异步路由与静态资源”。当前开发版本为 `0.5.0`；最近发布标签
+为第 10 章的 `v0.4.0`。主程序使用一个 `io_context` 和可配置数量的工作线程；每条
+Session 仍有自己的 strand，因此并发不会让单条连接的状态并行修改。
 
 完整教学见 [PROJECT_TUTORIAL.md](PROJECT_TUTORIAL.md)。
 
@@ -24,6 +24,9 @@ PulseGate 是一个用 C++20 和 Boost.Asio 逐步实现的 HTTP 网关学习项
 - 带唯一 `StopReason` 的 Session 状态机、连接注册表、连接上限和优雅 drain；
 - `AsioRuntime` 管理一个 `io_context`、work guard 与可配置的 `std::jthread` worker；
 - Session strand 串行化单连接状态；不同连接可由不同 worker 并行推进；
+- coroutine Router：精确/前缀匹配、405 Allow、请求 ID、异常到 500 的统一边界；
+- `/livez`、`/readyz`、`/metrics`、`/api/version`、`POST /echo`，以及可选静态文件；
+- 有界专用文件线程池，拒绝路径穿越、符号链接逃逸和超限静态文件；
 - GoogleTest + CTest；
 - Debug、Release、ASan/UBSan、TSan 独立预设；
 - clang-format、clang-tidy 与 GitHub 协作模板。
@@ -78,6 +81,18 @@ curl --noproxy '*' --include http://127.0.0.1:8080/healthz
 顺序处理的 Pipelining；慢 Header、慢 Body 和空闲 Keep-Alive 会按期限关闭。
 暂不支持 chunked 请求；默认 worker 数为硬件并发数，使用 `--threads N` 覆盖。不要在
 `io_context` worker 中执行同步 DNS、磁盘读取或长 CPU 任务。
+
+启用受限静态文件服务（`/static/*`）时显式给出 document root：
+
+```bash
+./build/debug/app/pulsegate --listen 127.0.0.1:8080 --threads 4 \
+  --document-root ./public
+curl --noproxy '*' --include http://127.0.0.1:8080/livez
+curl --noproxy '*' --include http://127.0.0.1:8080/static/index.html
+```
+
+静态文件默认最多 256 KiB；`..`、编码后的 `..`、NUL、反斜杠及逃出 document root 的
+符号链接会被拒绝。文件 I/O 不在 I/O worker 上执行，队列满时返回 503。
 
 第 6 章同步基线仍保留为独立学习程序：
 
