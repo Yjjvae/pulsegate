@@ -159,3 +159,45 @@ ctest --test-dir build/debug -R 'DeadlineTest|AsyncHttpServerTest.(Reclaims|Stop
 
 本阶段的默认期限是 Header 10 秒、Body 30 秒、Keep-Alive 空闲 15 秒。它们由
 `SessionLimits` 配置；测试使用 30 毫秒的局部配置，生产服务不应照搬这个值。
+
+## 阶段 4：多线程 `io_context` 与 strand 验收
+
+```bash
+cmake --preset debug
+cmake --build --preset debug
+ctest --preset debug --output-on-failure
+
+cmake --preset tsan
+cmake --build --preset tsan
+ctest --preset tsan --output-on-failure
+```
+
+启动 4 个 I/O worker：
+
+```bash
+./build/debug/app/pulsegate --listen 127.0.0.1:8080 --threads 4
+curl --noproxy '*' --include http://127.0.0.1:8080/healthz
+```
+
+定向验证：
+
+```bash
+ctest --test-dir build/debug \
+  -R 'AsioRuntimeTest|AsyncHttpServerTest.(ServesTheSame|Serializes|AllowsDifferent|AcceptsExternal|DrainsRegistry)' \
+  --output-on-failure
+```
+
+预期结果：
+
+- `--threads` 必须是正整数；`AsioRuntime(0)` 在启动前拒绝配置；
+- 1、2、4 worker 的 HTTP 行为一致；
+- 每个接受到的 socket 使用独立 Session strand，因此同一 pipelined Session 的 handler
+  最大并发数为 1；不同 Session 能在多个 worker 上并行推进；
+- 外部线程调用 `HttpServer::stop()` 会被投递到关联 executor；`requestStop()` 仅释放
+  work guard，让取消、drain 和清理 handler 自然执行；
+- Registry 在 300 条多 worker 连接完成后归零，所有 Runtime worker 都会 join；
+- 不要把阻塞操作放进 `io_context` worker。未来需要磁盘、DNS 或 CPU 工作时，使用有界的
+  专用 `asio::thread_pool`，完成结果再切回请求的关联 executor。
+
+`strand` 只保证关联 handler **不并发执行**，不保证固定在某个 OS 线程执行；它不能替代
+Registry、Metrics 或 Cache 等跨 Session 共享数据的同步策略。

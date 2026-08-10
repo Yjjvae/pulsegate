@@ -6,6 +6,7 @@ target_sources(
     unit/buffer_test.cpp
     unit/http_parser_test.cpp
     unit/deadline_test.cpp
+    unit/asio_runtime_test.cpp
     unit/smoke_test.cpp
 )
 target_link_libraries(

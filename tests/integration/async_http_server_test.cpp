@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <atomic>
 #include <boost/asio/buffer.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/ip/tcp.hpp>
@@ -18,6 +19,7 @@
 #include <vector>
 
 #include "pulsegate/http/http_server.h"
+#include "pulsegate/runtime/asio_runtime.h"
 
 namespace {
 
@@ -72,6 +74,48 @@ class RunningServer {
     asio::io_context context_{1};
     HttpServer server_;
     std::jthread thread_;
+};
+
+class MultiThreadedRunningServer {
+   public:
+    MultiThreadedRunningServer(std::size_t thread_count,
+                               pulsegate::http::RequestHandler handler = {},
+                               SessionLimits limits = {})
+        : runtime_(thread_count),
+          server_(runtime_.context(), ListenConfig{.host = "127.0.0.1", .port = 0},
+                  std::move(handler), limits) {
+        server_.start();
+        runtime_.start();
+    }
+
+    MultiThreadedRunningServer(const MultiThreadedRunningServer&) = delete;
+    MultiThreadedRunningServer& operator=(const MultiThreadedRunningServer&) = delete;
+
+    ~MultiThreadedRunningServer() {
+        stopAndJoin();
+    }
+
+    [[nodiscard]] tcp::endpoint endpoint() const {
+        return server_.localEndpoint();
+    }
+    void stop() {
+        server_.stop();
+    }
+    void stopAndJoin() {
+        server_.stop();
+        runtime_.requestStop();
+        runtime_.join();
+    }
+    [[nodiscard]] std::size_t connectionCount() const {
+        return server_.connectionCount();
+    }
+    [[nodiscard]] std::size_t closedCount(StopReason reason) const {
+        return server_.closedCount(reason);
+    }
+
+   private:
+    pulsegate::runtime::AsioRuntime runtime_;
+    HttpServer server_;
 };
 
 SessionLimits shortTimeoutLimits() {
@@ -163,7 +207,8 @@ class ResponseReader {
     std::string pending_;
 };
 
-std::string exchange(RunningServer& server, const std::vector<std::string_view>& fragments) {
+template <typename Server>
+std::string exchange(Server& server, const std::vector<std::string_view>& fragments) {
     asio::io_context client_context;
     tcp::socket client(client_context);
     client.connect(server.endpoint());
@@ -173,6 +218,13 @@ std::string exchange(RunningServer& server, const std::vector<std::string_view>&
 
     ResponseReader reader(client);
     return reader.readResponse();
+}
+
+void updateMaximum(std::atomic_int& maximum, int value) {
+    auto observed = maximum.load(std::memory_order_relaxed);
+    while (observed < value &&
+           !maximum.compare_exchange_weak(observed, value, std::memory_order_relaxed)) {
+    }
 }
 
 TEST(AsyncHttpServerTest, ServesHealthEndpoint) {
@@ -390,6 +442,110 @@ TEST(AsyncHttpServerTest, EnforcesConnectionLimitAndRecordsResourceRejection) {
     EXPECT_EQ(server.connectionCount(), 1U);
     EXPECT_EQ(server.closedCount(StopReason::ResourceLimit), 1U);
     first.close();
+}
+
+TEST(AsyncHttpServerTest, ServesTheSameProtocolWithOneTwoAndFourWorkers) {
+    for (const auto thread_count : {1U, 2U, 4U}) {
+        MultiThreadedRunningServer server(thread_count);
+        const auto response = exchange(server, {kHealthRequest});
+        EXPECT_NE(response.find("HTTP/1.1 200 OK\r\n"), std::string::npos);
+    }
+}
+
+TEST(AsyncHttpServerTest, SerializesHandlersForOnePipelinedSession) {
+    std::atomic_int active{0};
+    std::atomic_int maximum{0};
+    MultiThreadedRunningServer server(4, [&active, &maximum](const pulsegate::http::HttpRequest&) {
+        const auto now = active.fetch_add(1, std::memory_order_relaxed) + 1;
+        updateMaximum(maximum, now);
+        // Test-only contention probe; production handlers must not block an io worker.
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        active.fetch_sub(1, std::memory_order_relaxed);
+        pulsegate::http::HttpResponse response;
+        response.body = "ok\n";
+        return response;
+    });
+
+    asio::io_context client_context;
+    tcp::socket client(client_context);
+    client.connect(server.endpoint());
+    constexpr std::string_view requests =
+        "GET /healthz HTTP/1.1\r\nHost: localhost\r\n\r\n"
+        "GET /healthz HTTP/1.1\r\nHost: localhost\r\n\r\n"
+        "GET /healthz HTTP/1.1\r\nHost: localhost\r\n\r\n"
+        "GET /healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    asio::write(client, asio::buffer(requests));
+
+    ResponseReader reader(client);
+    for (int index = 0; index < 4; ++index) {
+        EXPECT_NE(reader.readResponse().find("HTTP/1.1 200 OK\r\n"), std::string::npos);
+    }
+    EXPECT_EQ(maximum.load(std::memory_order_relaxed), 1);
+}
+
+TEST(AsyncHttpServerTest, AllowsDifferentSessionsToAdvanceOnDifferentWorkers) {
+    constexpr std::size_t kClients = 8;
+    std::atomic_int active{0};
+    std::atomic_int maximum{0};
+    MultiThreadedRunningServer server(4, [&active, &maximum](const pulsegate::http::HttpRequest&) {
+        const auto now = active.fetch_add(1, std::memory_order_relaxed) + 1;
+        updateMaximum(maximum, now);
+        // Test-only probe: separate Session strands may run concurrently.
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        active.fetch_sub(1, std::memory_order_relaxed);
+        pulsegate::http::HttpResponse response;
+        response.body = "ok\n";
+        return response;
+    });
+
+    asio::io_context client_context;
+    std::vector<tcp::socket> clients;
+    clients.reserve(kClients);
+    for (std::size_t index = 0; index < kClients; ++index) {
+        clients.emplace_back(client_context);
+        clients.back().connect(server.endpoint());
+        asio::write(clients.back(), asio::buffer(kHealthRequest));
+    }
+    for (auto& client : clients) {
+        ResponseReader reader(client);
+        EXPECT_NE(reader.readResponse().find("HTTP/1.1 200 OK\r\n"), std::string::npos);
+    }
+    EXPECT_GE(maximum.load(std::memory_order_relaxed), 2);
+}
+
+TEST(AsyncHttpServerTest, AcceptsExternalThreadStopOnMultiWorkerRuntime) {
+    MultiThreadedRunningServer server(4, {}, shortTimeoutLimits());
+    asio::io_context client_context;
+    tcp::socket client(client_context);
+    client.connect(server.endpoint());
+    asio::write(client, asio::buffer("GET /healthz HTTP/1.1\r\nHo"));
+    ASSERT_TRUE(waitUntil([&server] { return server.connectionCount() == 1U; }));
+
+    std::jthread stop_thread([&server] { server.stop(); });
+    stop_thread.join();
+    EXPECT_TRUE(waitForClose(client));
+    EXPECT_TRUE(
+        waitUntil([&server] { return server.closedCount(StopReason::ServerShutdown) == 1U; }));
+    EXPECT_EQ(server.connectionCount(), 0U);
+}
+
+TEST(AsyncHttpServerTest, DrainsRegistryAfterManyMultiWorkerConnections) {
+    constexpr std::size_t kConnectionCount = 300;
+    MultiThreadedRunningServer server(4);
+    asio::io_context client_context;
+    std::vector<tcp::socket> clients;
+    clients.reserve(kConnectionCount);
+
+    for (std::size_t index = 0; index < kConnectionCount; ++index) {
+        clients.emplace_back(client_context);
+        clients.back().connect(server.endpoint());
+        asio::write(clients.back(), asio::buffer(kHealthRequest));
+    }
+    for (auto& client : clients) {
+        ResponseReader reader(client);
+        EXPECT_NE(reader.readResponse().find("HTTP/1.1 200 OK\r\n"), std::string::npos);
+    }
+    EXPECT_TRUE(waitUntil([&server] { return server.connectionCount() == 0U; }));
 }
 
 }  // namespace

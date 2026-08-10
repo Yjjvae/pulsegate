@@ -2,9 +2,9 @@
 
 PulseGate 是一个用 C++20 和 Boost.Asio 逐步实现的 HTTP 网关学习项目。
 
-当前开发进度是教程第 9 章“超时、取消与连接生命周期”。当前开发版本为
-`0.3.0`；最近发布标签为第 8 章的 `v0.2.0`。当前主程序能在一个 `io_context`
-线程上管理多个连接，但这仍是异步正确性基线，不是多线程性能版本。
+当前开发进度是教程第 10 章“多线程 `io_context` 与 strand”。当前开发版本为
+`0.4.0`；最近发布标签为第 9 章的 `v0.3.0`。主程序使用一个 `io_context` 和可配置
+数量的工作线程；每条 Session 仍有自己的 strand，因此并发不会让单条连接的状态并行修改。
 
 完整教学见 [PROJECT_TUTORIAL.md](PROJECT_TUTORIAL.md)。
 
@@ -22,6 +22,8 @@ PulseGate 是一个用 C++20 和 Boost.Asio 逐步实现的 HTTP 网关学习项
 - 单线程 C++20 Coroutine Listener/Session，慢客户端不会阻塞其他连接；
 - generation-safe `steady_timer` Deadline，以及 Header、Body 和 Keep-Alive 空闲超时；
 - 带唯一 `StopReason` 的 Session 状态机、连接注册表、连接上限和优雅 drain；
+- `AsioRuntime` 管理一个 `io_context`、work guard 与可配置的 `std::jthread` worker；
+- Session strand 串行化单连接状态；不同连接可由不同 worker 并行推进；
 - GoogleTest + CTest；
 - Debug、Release、ASan/UBSan、TSan 独立预设；
 - clang-format、clang-tidy 与 GitHub 协作模板。
@@ -63,7 +65,7 @@ ctest --preset debug
 启动当前异步服务器：
 
 ```bash
-./build/debug/app/pulsegate --listen 127.0.0.1:8080
+./build/debug/app/pulsegate --listen 127.0.0.1:8080 --threads 4
 ```
 
 另开一个终端验证健康检查：
@@ -74,7 +76,8 @@ curl --noproxy '*' --include http://127.0.0.1:8080/healthz
 
 预期 Body 为 `ok`。当前支持 HTTP/1.0、HTTP/1.1、`Content-Length`、Keep-Alive 和
 顺序处理的 Pipelining；慢 Header、慢 Body 和空闲 Keep-Alive 会按期限关闭。
-暂不支持 chunked 请求或多线程 I/O。
+暂不支持 chunked 请求；默认 worker 数为硬件并发数，使用 `--threads N` 覆盖。不要在
+`io_context` worker 中执行同步 DNS、磁盘读取或长 CPU 任务。
 
 第 6 章同步基线仍保留为独立学习程序：
 

@@ -21,18 +21,23 @@ target_link_libraries(
 
 # Stage 0 owns only the dependency boundary. Concrete runtime sources arrive in
 # later chapters, while users can already link against one stable project target.
-add_library(pulsegate_runtime INTERFACE)
+add_library(pulsegate_runtime STATIC)
 add_library(PulseGate::runtime ALIAS pulsegate_runtime)
 
+target_sources(
+  pulsegate_runtime
+  PRIVATE
+    runtime/asio_runtime.cpp
+)
 target_include_directories(
   pulsegate_runtime
-  INTERFACE
+  PUBLIC
     "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>"
     "$<INSTALL_INTERFACE:include>"
 )
 target_link_libraries(
   pulsegate_runtime
-  INTERFACE
+  PUBLIC
     Boost::headers
     Threads::Threads
     PulseGate::project_options
@@ -40,7 +45,7 @@ target_link_libraries(
 )
 target_compile_definitions(
   pulsegate_runtime
-  INTERFACE
+  PUBLIC
     BOOST_ASIO_NO_DEPRECATED
 )
 
