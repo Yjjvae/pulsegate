@@ -10,6 +10,22 @@ if(POLICY CMP0167)
 endif()
 find_package(Boost 1.83 REQUIRED)
 
+# Configuration is parsed through one project-owned boundary. Pinning a commit
+# avoids silently changing YAML semantics when a moving dependency tag changes.
+# yaml-cpp 0.8.0 still declares compatibility with CMake 3.5; CMake 4 requires
+# this explicit policy floor when configuring that third-party project.
+set(CMAKE_POLICY_VERSION_MINIMUM 3.5 CACHE STRING "" FORCE)
+set(YAML_CPP_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
+set(YAML_CPP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(YAML_CPP_INSTALL OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(
+  yaml_cpp
+  GIT_REPOSITORY https://github.com/jbeder/yaml-cpp.git
+  GIT_TAG f7320141120f720aecc4c32be25586e7da9eb978 # yaml-cpp 0.8.0
+  GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(yaml_cpp)
+
 if(PULSEGATE_BUILD_TESTS)
   find_package(GTest CONFIG QUIET)
 

@@ -1,0 +1,42 @@
+# Copy this file, adjust endpoints for your environment, then start with:
+# ./build/debug/app/pulsegate --config ./config/pulsegate.example.yaml
+server:
+  listen_host: 127.0.0.1
+  listen_port: 8080
+  io_threads: 4
+  idle_timeout_ms: 30000
+  header_timeout_ms: 5000
+  body_timeout_ms: 30000
+  graceful_shutdown_ms: 15000
+  max_connections: 20000
+  max_header_bytes: 16384
+  max_body_bytes: 1048576
+  output_high_water_bytes: 4194304
+  output_low_water_bytes: 2097152
+
+routes:
+  - path_prefix: /api/
+    upstream: demo
+    rate_limit:
+      requests_per_second: 1000
+      burst: 200
+    cache:
+      enabled: true
+      ttl_ms: 1000
+      max_object_bytes: 262144
+      max_bytes: 4194304
+      shards: 16
+
+upstreams:
+  - name: demo
+    endpoints:
+      - 127.0.0.1:9001
+      - 127.0.0.1:9002
+    connect_timeout_ms: 300
+    response_timeout_ms: 2000
+    max_connections_per_endpoint: 64
+    pool_shards: 1
+
+logging:
+  level: info
+  format: json

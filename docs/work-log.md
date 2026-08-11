@@ -634,6 +634,49 @@
 - 指标模块将在第 18 章集中接入，届时补充 breaker state、admission rejection 和 backpressure pause
   的聚合指标，避免在当前阶段形成临时指标接口。
 
+## 2026-08-11
+
+### 第十七章：YAML 配置加载与安全重载边界
+
+完成内容：
+
+- 在 `cmake/Dependencies.cmake` 集中以固定 commit 引入 `yaml-cpp 0.8.0`，关闭其工具、测试和安装目标；
+  同时显式声明与 CMake 4 的兼容策略下限，避免第三方项目的旧策略警告影响主工程；
+- 新增强类型 `Config`、`ServerConfig`、`UpstreamConfig`、`RouteConfig` 与 `LoggingConfig`，
+  `ConfigLoader` 将 YAML 文件的语法读取和业务校验分离，并收集带字段路径的全部错误后一次报告；
+- 覆盖监听地址与端口、IO 线程、超时、连接/Header/Body/输出水位、路由限流与缓存、上游端点及连接池、
+  日志级别与格式；提供 `config/pulsegate.example.yaml` 和 `pulsegate --config FILE` 启动入口；
+- 验证跨字段约束：端口范围、正数时间/容量、Body 安全上限、输出低水位小于高水位、上游名称与端点唯一、
+  路由引用存在的上游、缓存分片预算以及字段名中的毫秒单位；
+- 新增 `ConfigManager`：SIGHUP 经 manager strand 去重，将解析和完整校验放到专用 worker，随后回到
+  strand 原子发布不可变 `shared_ptr<const ConfigSnapshot>`；失败始终保留旧快照；
+- 对会改变已运行 Server/Router/Proxy 行为的监听、线程、限制、路由和上游配置明确返回“需要重启”。
+  当前只有日志元数据可安全发布，避免出现“配置已重载但实际没有生效”的半应用状态；开发版本升级至
+  `0.9.0`。
+
+验证结果：
+
+- 新增配置单元测试，覆盖合法 YAML 与默认值、聚合错误路径、动态日志配置发布，以及静态端口变更拒绝后
+  仍保留旧快照；
+- Debug、ASan/UBSan、TSan 的完整回环 CTest 均为 **117/117 通过**；
+  `clang-format --dry-run --Werror`、`git diff --check`、独立 `-Werror` 构建和 Release 构建均通过，
+  Release `--version` 输出 `0.9.0`。
+- 使用临时配置将监听端口改为 `127.0.0.1:18080`，验证 `pulsegate --config FILE` 可实际启动、
+  `/livez` 返回 `200 alive`，并能通过 `SIGINT` 正常退出。
+
+重要决策：
+
+- 配置加载不把字段缺失、类型错误和跨字段错误混为一谈；先构造带默认值的候选对象，再统一验证，便于
+  用户一次修复所有可定位问题；
+- 重载以完整候选快照为提交单元。配置文件读取失败、YAML 语法错误或校验失败都不会修改正在服务的配置；
+- 本阶段不声称热更新 listen socket、线程数、路由或上游池。它们需要组件级替换和优雅 drain，后续实现
+  前一律要求重启，保证运行语义诚实且可预测。
+
+遗留事项：
+
+- 第 18 章接入指标与结构化日志时，将消费日志配置快照，并记录重载成功、失败和“需要重启”的次数；
+- 未来可为路由和上游引入不可变运行时对象与 drain 协议，届时再逐步扩大允许热更新的配置范围。
+
 ## 后续记录模板
 
 ```markdown

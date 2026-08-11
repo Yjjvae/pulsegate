@@ -15,10 +15,12 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
 #include "pulsegate/core/version.h"
+#include "pulsegate/http/config.h"
 #include "pulsegate/http/health_checker.h"
 #include "pulsegate/http/http_server.h"
 #include "pulsegate/http/reverse_proxy.h"
@@ -130,7 +132,8 @@ double parsePositiveDouble(std::string_view value, std::string_view option) {
 
 void printUsage(std::ostream& output) {
     output << "PulseGate " << pulsegate::core::version() << '\n'
-           << "Usage: pulsegate [--listen HOST:PORT] [--threads N] [--document-root PATH] "
+           << "Usage: pulsegate [--config FILE | --listen HOST:PORT] [--threads N] "
+              "[--document-root PATH] "
               "[--proxy-upstream HOST:PORT] "
               "[--rate-limit RPS --rate-burst N [--rate-per-client]] "
               "[--proxy-rate-limit RPS --proxy-rate-burst N [--proxy-rate-per-client]] "
@@ -141,6 +144,118 @@ void printUsage(std::ostream& output) {
            << "Example: pulsegate --listen 127.0.0.1:8080 --threads 4\n";
 }
 
+pulsegate::http::SessionLimits sessionLimitsFromConfig(
+    const pulsegate::http::ServerConfig& config) {
+    pulsegate::http::SessionLimits limits;
+    limits.parser.max_header_bytes = config.max_header_bytes;
+    limits.parser.max_body_bytes = config.max_body_bytes;
+    limits.max_buffer_bytes =
+        std::max(config.max_body_bytes + limits.parser.max_header_bytes, limits.read_chunk_bytes);
+    limits.header_timeout = config.header_timeout;
+    limits.body_timeout = config.body_timeout;
+    limits.idle_timeout = config.idle_timeout;
+    limits.max_connections = config.max_connections;
+    return limits;
+}
+
+int runFromConfig(const std::filesystem::path& path) {
+    pulsegate::http::ConfigLoader loader;
+    const auto loaded = loader.loadFromFile(path);
+    auto initial =
+        std::make_shared<const pulsegate::http::ConfigSnapshot>(pulsegate::http::ConfigSnapshot{
+            .value = loaded, .source_path = path, .loaded_at = std::chrono::system_clock::now()});
+    pulsegate::runtime::AsioRuntime runtime(loaded.server.io_threads);
+    auto manager = std::make_shared<pulsegate::http::ConfigManager>(
+        runtime.context().get_executor(), path, initial);
+    auto router = pulsegate::http::HttpServer::makeDefaultRouter();
+    std::vector<std::shared_ptr<pulsegate::http::HealthChecker>> health_checkers;
+    std::vector<pulsegate::http::ReverseProxy> reverse_proxies;
+    std::unordered_map<std::string, pulsegate::http::ReverseProxy> proxies;
+    for (const auto& upstream : loaded.upstreams) {
+        pulsegate::http::ReverseProxy proxy(upstream.endpoints, upstream.proxy_limits);
+        auto checker = std::make_shared<pulsegate::http::HealthChecker>(
+            runtime.context().get_executor(), pulsegate::http::HealthCheckConfig{},
+            upstream.endpoints, proxy.health());
+        checker->start();
+        health_checkers.push_back(std::move(checker));
+        reverse_proxies.push_back(proxy);
+        proxies.emplace(upstream.name, std::move(proxy));
+    }
+    for (const auto& route : loaded.routes) {
+        const auto found = proxies.find(route.upstream);
+        if (found == proxies.end()) {
+            throw std::logic_error("validated route references missing upstream");
+        }
+        const auto add = [&router, &route,
+                          proxy = found->second](pulsegate::http::HttpMethod method) {
+            router->add(
+                pulsegate::http::Route{
+                    .method = method,
+                    .pattern = route.path_prefix,
+                    .name = "config:" + route.path_prefix,
+                    .prefix_match = true,
+                    .handler = [proxy](pulsegate::http::RequestContext& context,
+                                       pulsegate::http::HttpRequest request)
+                        -> pulsegate::net::Awaitable<pulsegate::http::HttpResponse> {
+                        co_return co_await proxy(context, std::move(request));
+                    }},
+                route.rate_limit, route.cache);
+        };
+        add(pulsegate::http::HttpMethod::Get);
+        add(pulsegate::http::HttpMethod::Head);
+        add(pulsegate::http::HttpMethod::Post);
+        add(pulsegate::http::HttpMethod::Put);
+        add(pulsegate::http::HttpMethod::Delete);
+    }
+    const pulsegate::net::ListenConfig listen{
+        .host = loaded.server.listen_host,
+        .port = static_cast<std::uint16_t>(loaded.server.listen_port)};
+    pulsegate::http::HttpServer server(runtime.context(), listen,
+                                       pulsegate::http::RouterConfig{std::move(router)},
+                                       sessionLimitsFromConfig(loaded.server));
+    const auto endpoint = server.localEndpoint();
+    std::cout << "PulseGate listening on " << endpoint.address().to_string() << ':'
+              << endpoint.port() << " (config " << path.string() << ")\n";
+
+    auto signals =
+        std::make_shared<boost::asio::signal_set>(runtime.context(), SIGINT, SIGTERM, SIGHUP);
+    auto wait_signal = std::make_shared<std::function<void()>>();
+    *wait_signal = [signals, wait_signal, manager, &server, &runtime, &health_checkers,
+                    &reverse_proxies] {
+        signals->async_wait([signals, wait_signal, manager, &server, &runtime, &health_checkers,
+                             &reverse_proxies](const boost::system::error_code& error, int signal) {
+            if (error) return;
+            if (signal == SIGHUP) {
+                manager->requestReload([](pulsegate::http::ConfigReloadResult result) {
+                    if (result.published) {
+                        std::cerr << "PulseGate configuration snapshot reloaded\n";
+                    } else if (!result.restart_required.empty()) {
+                        std::cerr << "PulseGate configuration change requires restart:";
+                        for (const auto& field : result.restart_required) std::cerr << ' ' << field;
+                        std::cerr << '\n';
+                    } else {
+                        for (const auto& issue : result.errors) {
+                            std::cerr << "PulseGate configuration reload failed: " << issue.format()
+                                      << '\n';
+                        }
+                    }
+                });
+                (*wait_signal)();
+                return;
+            }
+            for (const auto& checker : health_checkers) checker->stop();
+            for (const auto& proxy : reverse_proxies) proxy.stop();
+            server.stop();
+            runtime.requestStop();
+        });
+    };
+    (*wait_signal)();
+    server.start();
+    runtime.start();
+    runtime.join();
+    return 0;
+}
+
 }  // namespace
 
 int main(int argc, char* argv[]) {
@@ -148,6 +263,7 @@ int main(int argc, char* argv[]) {
         pulsegate::net::ListenConfig config;
         std::size_t thread_count = defaultThreadCount();
         std::optional<std::filesystem::path> document_root;
+        std::optional<std::filesystem::path> config_path;
         std::vector<pulsegate::http::UpstreamEndpoint> proxy_upstreams;
         std::optional<double> rate_limit;
         std::optional<double> rate_burst;
@@ -177,6 +293,10 @@ int main(int argc, char* argv[]) {
             }
             if (argument == "--listen" && index + 1 < argc) {
                 config = parseListenAddress(argv[++index]);
+                continue;
+            }
+            if (argument == "--config" && index + 1 < argc) {
+                config_path = argv[++index];
                 continue;
             }
             if (argument == "--threads" && index + 1 < argc) {
@@ -233,6 +353,13 @@ int main(int argc, char* argv[]) {
                 continue;
             }
             throw std::invalid_argument("unknown or incomplete argument: " + std::string(argument));
+        }
+
+        if (config_path) {
+            if (argc != 3) {
+                throw std::invalid_argument("--config cannot be combined with other options");
+            }
+            return runFromConfig(*config_path);
         }
 
         if (rate_limit.has_value() != rate_burst.has_value()) {
