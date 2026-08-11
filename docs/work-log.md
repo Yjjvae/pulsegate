@@ -593,6 +593,47 @@
 - 后续可实现后台分批过期清理与 SingleFlight，减少热点 miss 同时穿透上游；
 - 缓存暂不解析上游的 `max-age`、ETag、条件请求或 revalidation；TTL 是显式本地配置。
 
+## 2026-08-11
+
+### 第十六章：熔断、背压与过载保护
+
+完成内容：
+
+- 新增每端点、线程安全的 `CircuitBreaker` 状态机：Closed 在连续失败阈值后进入 Open；冷却后转为
+  Half-Open，并用独立 probe budget 防止恢复瞬间的并发洪峰；成功关闭并清零，失败立即重新打开；
+- 代理选择端点时同时检查健康快照与熔断器许可。Open 请求快速返回 `503` 和向上取整的
+  `Retry-After`，不占用上游连接池，也不访问故障端点；
+- `ProxyLimits` 新增全局 `max_in_flight_requests`（默认 1024）和可配置的过载重试时间。CAS 准入失败或
+  连接池 waiter 满/超时均明确返回 `503 Service Unavailable` 和 `Retry-After`；
+- 将失败分类固定下来：连接、解析、超时及按策略计入的 5xx 同时写入健康状态和熔断器；客户端取消、
+  停机、Upgrade 拒绝及本地准入拒绝只释放 Half-Open probe，不把本地问题误判成上游故障；
+- 沿用流式代理“一次下游写完成后才读下一块上游数据”的反压边界，以及 `Buffer`、Session、Pool 和
+  waiter 的绝对上限；开发版本提升至 `0.8.2`。
+
+验证结果：
+
+- 新增熔断器单元测试，覆盖阈值打开、冷却前拒绝、Half-Open 成功/失败、16 线程并发下仅一个 probe
+  获准，以及中性结果释放 probe；
+- 新增回环集成用例：连续三个 keep-alive 500 后第四个请求返回带 `Retry-After: 5` 的 503，且 Mock
+  Upstream 未收到第四个请求；另覆盖关闭 5xx 故障计数后的持续 500，以及活动事务上限导致的池前 503；
+- Debug、ASan/UBSan、TSan 的完整回环 CTest 均为 **114/114 通过**；`clang-format --dry-run --Werror`、
+  `git diff --check`、独立 `-Werror` 构建和 Release 构建均通过，Release `--version` 输出 `0.8.2`。
+
+重要决策：
+
+- 健康检查和熔断器职责不同：前者是主动/被动端点可用性快照，后者是业务失败时的快速短路；二者都
+  拒绝时优先向调用方返回熔断状态，避免把已知故障伪装为“没有健康节点”；
+- 过载使用 503 而不是 429：429 表示调用方触发配额，503 表示网关或上游资源暂时耗尽；两者都带
+  `Retry-After` 以便客户端采取退避；
+- 本章不引入无限制后台队列或“每个分片都 post”的伪公平性。现有每次 async write 的自然让出和
+  单连接有界 Buffer 是当前响应流的反压基础；更细的预算和输出高低水位将在配置/压测阶段按数据调优。
+
+遗留事项：
+
+- CLI 尚未公开熔断阈值、冷却、in-flight 或 Pool 上限；第 17 章配置加载器会一起提供类型校验；
+- 指标模块将在第 18 章集中接入，届时补充 breaker state、admission rejection 和 backpressure pause
+  的聚合指标，避免在当前阶段形成临时指标接口。
+
 ## 后续记录模板
 
 ```markdown

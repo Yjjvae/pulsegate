@@ -47,6 +47,8 @@ TEST(ReverseProxyTest, MapsStructuredErrorsWithoutLeakingTransportDetails) {
     EXPECT_EQ(makeProxyErrorResponse(ProxyError::ConnectTimeout).status_code, 504);
     EXPECT_EQ(makeProxyErrorResponse(ProxyError::ResponseTimeout).status_code, 504);
     EXPECT_EQ(makeProxyErrorResponse(ProxyError::Cancelled).status_code, 503);
+    EXPECT_EQ(makeProxyErrorResponse(ProxyError::CircuitOpen).status_code, 503);
+    EXPECT_EQ(makeProxyErrorResponse(ProxyError::Overloaded).status_code, 503);
     EXPECT_EQ(makeProxyErrorResponse(ProxyError::UnsupportedRequest).status_code, 501);
 }
 
@@ -64,6 +66,12 @@ TEST(ReverseProxyTest, BuildsHealthSnapshotUsingConfiguredThresholds) {
     EXPECT_FALSE(health->isHealthy("backend.local:8081"));
 
     limits.health_thresholds.healthy_threshold = 0;
+    EXPECT_THROW(
+        (ReverseProxy({UpstreamEndpoint{.host = "backend.local", .service = "8081"}}, limits)),
+        std::invalid_argument);
+
+    limits.health_thresholds = {};
+    limits.max_in_flight_requests = 0;
     EXPECT_THROW(
         (ReverseProxy({UpstreamEndpoint{.host = "backend.local", .service = "8081"}}, limits)),
         std::invalid_argument);

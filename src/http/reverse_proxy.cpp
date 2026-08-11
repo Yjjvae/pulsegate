@@ -166,6 +166,16 @@ HttpResponse makeProxyErrorResponse(ProxyError error) {
             response.reason = "Service Unavailable";
             response.body = "no healthy upstream\n";
             break;
+        case ProxyError::CircuitOpen:
+            response.status_code = 503;
+            response.reason = "Service Unavailable";
+            response.body = "upstream circuit is open\n";
+            break;
+        case ProxyError::Overloaded:
+            response.status_code = 503;
+            response.reason = "Service Unavailable";
+            response.body = "gateway is overloaded\n";
+            break;
         case ProxyError::UnsupportedRequest:
             response.status_code = 501;
             response.reason = "Not Implemented";
@@ -500,6 +510,12 @@ ReverseProxy::ReverseProxy(std::vector<UpstreamEndpoint> upstreams, ProxyLimits 
     state_->health = std::make_shared<HealthStateStore>(state_->limits.health_thresholds);
     for (const auto& upstream : state_->upstreams) {
         state_->health->addEndpoint(upstream.host + ":" + upstream.service);
+        state_->circuits.push_back(
+            std::make_shared<CircuitBreaker>(state_->limits.circuit_breaker));
+    }
+    if (state_->limits.max_in_flight_requests == 0 ||
+        state_->limits.overload_retry_after <= std::chrono::seconds::zero()) {
+        throw std::invalid_argument("proxy overload limits must be positive");
     }
 }
 
@@ -530,17 +546,58 @@ void ReverseProxy::stop() const {
 
 net::Awaitable<HttpResponse> ReverseProxy::operator()(RequestContext& context,
                                                       HttpRequest request) const {
+    std::size_t observed = state_->in_flight.load(std::memory_order_relaxed);
+    while (observed < state_->limits.max_in_flight_requests &&
+           !state_->in_flight.compare_exchange_weak(
+               observed, observed + 1, std::memory_order_acq_rel, std::memory_order_relaxed)) {
+    }
+    if (observed >= state_->limits.max_in_flight_requests) {
+        auto response = makeProxyErrorResponse(ProxyError::Overloaded);
+        response.headers.add("Retry-After",
+                             std::to_string(state_->limits.overload_retry_after.count()));
+        co_return response;
+    }
+    struct InFlightRelease {
+        std::atomic<std::size_t>& count;
+        ~InFlightRelease() {
+            count.fetch_sub(1, std::memory_order_release);
+        }
+    } release{state_->in_flight};
+
     std::optional<std::size_t> index;
+    bool circuit_rejected = false;
+    std::chrono::steady_clock::time_point earliest_retry{};
     for (std::size_t attempt = 0; attempt < state_->upstreams.size(); ++attempt) {
         const auto candidate =
             state_->next.fetch_add(1, std::memory_order_relaxed) % state_->upstreams.size();
         const auto& endpoint = state_->upstreams[candidate];
-        if (state_->health->isHealthy(endpoint.host + ":" + endpoint.service)) {
+        if (state_->health->isHealthy(endpoint.host + ":" + endpoint.service) &&
+            state_->circuits[candidate]->allowRequest()) {
             index = candidate;
             break;
         }
+        const auto circuit = state_->circuits[candidate]->snapshot();
+        if (circuit.state != CircuitState::Closed) {
+            circuit_rejected = true;
+            if (earliest_retry == std::chrono::steady_clock::time_point{} ||
+                circuit.retry_at < earliest_retry) {
+                earliest_retry = circuit.retry_at;
+            }
+        }
     }
     if (!index) {
+        if (circuit_rejected) {
+            auto response = makeProxyErrorResponse(ProxyError::CircuitOpen);
+            const auto now = std::chrono::steady_clock::now();
+            const auto wait = earliest_retry > now ? earliest_retry - now
+                                                   : decltype(earliest_retry - now)::zero();
+            const auto seconds =
+                std::max<std::int64_t>(1, std::chrono::duration_cast<std::chrono::seconds>(
+                                              wait + std::chrono::milliseconds(999))
+                                              .count());
+            response.headers.add("Retry-After", std::to_string(seconds));
+            co_return response;
+        }
         co_return makeProxyErrorResponse(ProxyError::NoHealthyUpstream);
     }
     const auto pool = state_->poolFor(*index, context.executor);
@@ -548,7 +605,11 @@ net::Awaitable<HttpResponse> ReverseProxy::operator()(RequestContext& context,
     auto lease =
         co_await pool->asyncAcquire(net::asio::redirect_error(net::use_awaitable, acquire_error));
     if (acquire_error || !lease.valid()) {
-        co_return makeProxyErrorResponse(ProxyError::NoHealthyUpstream);
+        state_->circuits[*index]->recordNeutral();
+        auto response = makeProxyErrorResponse(ProxyError::Overloaded);
+        response.headers.add("Retry-After",
+                             std::to_string(state_->limits.overload_retry_after.count()));
+        co_return response;
     }
     auto session = std::make_shared<ProxySession>(context.executor, state_->upstreams[*index],
                                                   state_->limits, std::move(lease));
@@ -571,12 +632,18 @@ net::Awaitable<HttpResponse> ReverseProxy::operator()(RequestContext& context,
     }
     const auto& endpoint = state_->upstreams[*index];
     const auto id = endpoint.host + ":" + endpoint.service;
-    if (result.error == ProxyError::None &&
-        (!state_->limits.count_5xx_as_health_failure || result.upstream_status < 500)) {
+    const bool upstream_failure =
+        result.error != ProxyError::None ||
+        (state_->limits.count_5xx_as_health_failure && result.upstream_status >= 500);
+    if (!upstream_failure) {
         state_->health->recordSuccess(id);
+        state_->circuits[*index]->recordSuccess();
     } else if (result.error != ProxyError::Cancelled &&
                result.error != ProxyError::UnsupportedRequest) {
         state_->health->recordFailure(id);
+        state_->circuits[*index]->recordFailure();
+    } else {
+        state_->circuits[*index]->recordNeutral();
     }
     co_return result.error == ProxyError::None ? result.response
                                                : makeProxyErrorResponse(result.error);

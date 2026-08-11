@@ -4,6 +4,7 @@ target_sources(
   pulsegate_unit_tests
   PRIVATE
     unit/buffer_test.cpp
+    unit/circuit_breaker_test.cpp
     unit/http_parser_test.cpp
     unit/http_response_parser_test.cpp
     unit/rate_limiter_test.cpp
