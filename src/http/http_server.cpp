@@ -511,6 +511,7 @@ std::shared_ptr<Router> HttpServer::makeDefaultRouter(
         response.body = "pulsegate_ready 1\n";
         if (const auto locked_router = weak_router.lock()) {
             response.body.append(locked_router->rateLimitMetrics());
+            response.body.append(locked_router->cacheMetrics());
         }
         response.headers.add("Content-Type", "text/plain; version=0.0.4");
         co_return response;

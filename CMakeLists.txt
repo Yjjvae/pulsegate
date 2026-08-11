@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.24)
 
 project(
   PulseGate
-  VERSION 0.8.0
+  VERSION 0.8.1
   DESCRIPTION "A Boost.Asio based HTTP gateway"
   LANGUAGES CXX
 )

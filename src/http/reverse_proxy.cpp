@@ -555,7 +555,7 @@ net::Awaitable<HttpResponse> ReverseProxy::operator()(RequestContext& context,
     if (context.set_current_proxy) {
         context.set_current_proxy(session);
     }
-    const auto result = request.method == HttpMethod::Head
+    const auto result = (request.method == HttpMethod::Head || context.buffer_response_for_cache)
                             ? co_await session->execute(context, std::move(request))
                             : co_await session->forward(context, std::move(request));
     if (context.set_current_proxy) {

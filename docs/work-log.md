@@ -549,6 +549,50 @@
 - 当前 CLI 暴露速率、burst 和客户端维度；分片数、TTL、最大 key 数保留为 API 安全默认值，
   后续如需运行时配置应同时补充上限校验和运维文档。
 
+## 2026-08-11
+
+### 第十五章：分片 LRU + TTL 响应缓存
+
+完成内容：
+
+- 新增 `ResponseCache`：每个 shard 在 mutex 下维护 LRU list 与索引；总字节预算按 shard 精确分配，
+  插入会按字节数淘汰最久未使用条目；读取命中提升到 LRU 前端，过期条目惰性删除；
+- Cache key 包含固定 plaintext `http` scheme、规范化 Host、路径、Query 与配置的 Vary 请求头；
+  `Authorization`、`Cookie` 请求以及 `Set-Cookie`、`Cache-Control: private/no-store`、`Vary: *`
+  响应拒绝缓存；仅完整 GET 200 响应填充，HEAD 可读取 GET 缓存但不会覆盖它；
+- `Router::add()` 新增可选缓存配置。缓存 hit 在 handler 前短路并返回 `X-Cache: HIT`；成功填充为
+  `MISS`，策略或容量跳过为 `BYPASS`，所有路径保留独立 `X-Request-Id`；
+- `/proxy/*` 提供 `--proxy-cache-ttl-ms`、`--proxy-cache-max-bytes`、
+  `--proxy-cache-entry-max-bytes`、`--proxy-cache-shards`。缓存 miss 令代理走完整响应路径；未启用
+  缓存的代理仍保持原有 chunked 流式下游行为；
+- `/metrics` 增加无高基数标签的 `pulsegate_response_cache_operations_total`，记录 hit、miss、
+  store、eviction 与 expired；开发版本升级至 `0.8.1`。
+
+验证结果：
+
+- 单元测试覆盖 LRU 命中提升、按字节淘汰、TTL、相同 key 更新、无效容量配置、并发 get/put、
+  敏感请求/响应、Cache key Host 规范化及超大 Body；
+- Router 测试覆盖显式缓存路由、GET 填充、HEAD 命中但不发送 Body、敏感请求 bypass 与指标；
+- 回环代理集成测试确认 GET 第一次 MISS、第二次 HIT，Mock Upstream 仅收到一次请求；
+- Debug、ASan/UBSan、TSan 完整 CTest 均为 **106/106 通过**；`-Werror` 与 Release 构建通过，
+  Release `--version` 输出 `0.8.1`；
+- ASan 曾发现 Cache key 的 Query 分支把临时 `std::string` 转成悬空 `string_view`；已改为从
+  `request.target` 的稳定 `string_view` 切片，并在修复后重新完成完整 ASan 回归。
+
+重要决策：
+
+- 以总字节数而非对象数量限制缓存；为避免配置承诺的对象无法写入，单对象上限不得超过任一 shard
+  的预算，CLI 默认据此选择 shard 数；
+- 当前缓存置于 Router handler 边界，因此只有路线明确配置后才生效；限流仍在缓存读取之前执行，避免
+  缓存命中绕开过载保护；
+- 代理缓存需要先得到完整、可验证的上游响应，故缓存 miss 不使用流式转发；这是与低首字节延迟之间
+  明确记录的取舍。
+
+遗留事项：
+
+- 后续可实现后台分批过期清理与 SingleFlight，减少热点 miss 同时穿透上游；
+- 缓存暂不解析上游的 `max-age`、ETag、条件请求或 revalidation；TTL 是显式本地配置。
+
 ## 后续记录模板
 
 ```markdown

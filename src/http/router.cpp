@@ -33,11 +33,13 @@ std::string methodName(HttpMethod method) {
 
 Router::Router(std::optional<RateLimitConfig> global_rate_limit)
     : routes_(std::make_shared<const Routes>()),
-      route_limiters_(std::make_shared<const RouteLimiters>()) {
+      route_limiters_(std::make_shared<const RouteLimiters>()),
+      route_caches_(std::make_shared<const RouteCaches>()) {
     if (global_rate_limit) global_limiter_ = std::make_shared<RateLimiter>(*global_rate_limit);
 }
 
-void Router::add(Route route, std::optional<RateLimitConfig> rate_limit) {
+void Router::add(Route route, std::optional<RateLimitConfig> rate_limit,
+                 std::optional<ResponseCacheConfig> cache) {
     if (route.pattern.empty() || route.pattern.front() != '/' || route.name.empty() ||
         !route.handler) {
         throw std::invalid_argument("route requires an absolute pattern, name, and handler");
@@ -47,11 +49,16 @@ void Router::add(Route route, std::optional<RateLimitConfig> rate_limit) {
     auto updated = std::make_shared<Routes>(*current);
     auto current_limiters = route_limiters_.load(std::memory_order_acquire);
     auto updated_limiters = std::make_shared<RouteLimiters>(*current_limiters);
+    auto current_caches = route_caches_.load(std::memory_order_acquire);
+    auto updated_caches = std::make_shared<RouteCaches>(*current_caches);
     if (rate_limit) (*updated_limiters)[route.name] = std::make_shared<RateLimiter>(*rate_limit);
+    if (cache) (*updated_caches)[route.name] = std::make_shared<ResponseCache>(*cache);
     updated->push_back(std::move(route));
     routes_.store(std::const_pointer_cast<const Routes>(updated), std::memory_order_release);
     route_limiters_.store(std::const_pointer_cast<const RouteLimiters>(updated_limiters),
                           std::memory_order_release);
+    route_caches_.store(std::const_pointer_cast<const RouteCaches>(updated_caches),
+                        std::memory_order_release);
 }
 
 std::optional<Route> Router::match(HttpMethod method, std::string_view target) const {
@@ -111,10 +118,39 @@ net::Awaitable<HttpResponse> Router::handle(RequestContext& context, HttpRequest
         if (!allowed) {
             response = makeRateLimited(*decision);
         } else {
+            const auto route_caches = route_caches_.load(std::memory_order_acquire);
+            const auto cache = route_caches->find(iterator->name);
+            const bool cache_configured = cache != route_caches->end();
+            const bool cacheable_request =
+                cache_configured && ResponseCache::cacheableRequest(request);
+            const bool can_store_response = request.method == HttpMethod::Get;
+            std::optional<std::string> cache_key;
+            if (cacheable_request) {
+                cache_key = ResponseCache::makeKey(request, cache->second->config());
+                if (auto cached = cache->second->get(*cache_key)) {
+                    response = std::move(*cached);
+                    response.headers.set("X-Cache", "HIT");
+                    response.headers.set("X-Request-Id", context.request_id);
+                    co_return response;
+                }
+                context.buffer_response_for_cache = true;
+            }
             try {
                 response = co_await iterator->handler(context, std::move(request));
             } catch (...) {
                 response = makeError(500, "Internal Server Error", "internal server error\n");
+            }
+            context.buffer_response_for_cache = false;
+            if (cacheable_request) {
+                if (can_store_response &&
+                    ResponseCache::cacheableResponse(response, cache->second->config()) &&
+                    cache->second->put(std::move(*cache_key), response)) {
+                    response.headers.set("X-Cache", "MISS");
+                } else {
+                    response.headers.set("X-Cache", "BYPASS");
+                }
+            } else if (cache_configured) {
+                response.headers.set("X-Cache", "BYPASS");
             }
         }
     }
@@ -157,6 +193,36 @@ std::string Router::rateLimitMetrics() const {
         routes.rejected_key_capacity += stats.rejected_key_capacity;
     }
     if (!route_limiters->empty()) append(output, "route", routes);
+    return output;
+}
+
+std::string Router::cacheMetrics() const {
+    const auto caches = route_caches_.load(std::memory_order_acquire);
+    if (caches->empty()) return {};
+
+    CacheStats totals;
+    for (const auto& [name, cache] : *caches) {
+        static_cast<void>(name);
+        const auto stats = cache->stats();
+        totals.hits += stats.hits;
+        totals.misses += stats.misses;
+        totals.stores += stats.stores;
+        totals.evictions += stats.evictions;
+        totals.expired += stats.expired;
+    }
+    std::string output{"# TYPE pulsegate_response_cache_operations_total counter\n"};
+    const auto append = [&output](std::string_view operation, std::uint64_t value) {
+        output.append("pulsegate_response_cache_operations_total{operation=\"");
+        output.append(operation);
+        output.append("\"} ");
+        output.append(std::to_string(value));
+        output.push_back('\n');
+    };
+    append("hit", totals.hits);
+    append("miss", totals.misses);
+    append("store", totals.stores);
+    append("eviction", totals.evictions);
+    append("expired", totals.expired);
     return output;
 }
 

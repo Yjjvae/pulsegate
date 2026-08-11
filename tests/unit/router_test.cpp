@@ -17,6 +17,7 @@ using pulsegate::http::HttpRequest;
 using pulsegate::http::HttpResponse;
 using pulsegate::http::RateLimitConfig;
 using pulsegate::http::RequestContext;
+using pulsegate::http::ResponseCacheConfig;
 using pulsegate::http::Route;
 using pulsegate::http::Router;
 
@@ -199,6 +200,59 @@ TEST(RouterTest, AppliesAGlobalLimitBeforeRouteLookup) {
     EXPECT_EQ(rejected.headers.get("retry-after"), "1");
     EXPECT_NE(router.rateLimitMetrics().find("scope=\"global\",outcome=\"rejected\"} 1"),
               std::string::npos);
+}
+
+TEST(RouterTest, CachesExplicitGetAndHeadRoutesWithoutCachingSensitiveRequests) {
+    Router router;
+    int calls = 0;
+    const ResponseCacheConfig cache{.ttl = std::chrono::seconds(1),
+                                    .max_entry_bytes = 128,
+                                    .max_bytes = 1024,
+                                    .shard_count = 2,
+                                    .vary_headers = {}};
+    const auto handler = [&calls](RequestContext&,
+                                  HttpRequest) -> pulsegate::net::Awaitable<HttpResponse> {
+        ++calls;
+        HttpResponse response;
+        response.body = "cached\n";
+        co_return response;
+    };
+    router.add(
+        Route{
+            .method = HttpMethod::Get, .pattern = "/cached", .name = "cached", .handler = handler},
+        std::nullopt, cache);
+    router.add(
+        Route{
+            .method = HttpMethod::Head, .pattern = "/cached", .name = "cached", .handler = handler},
+        std::nullopt, cache);
+
+    const HttpRequest get{.method = HttpMethod::Get,
+                          .target = "/cached",
+                          .version_major = 1,
+                          .version_minor = 1,
+                          .headers = {},
+                          .body = {}};
+    const auto first = invoke(router, get);
+    const auto second = invoke(router, get);
+    EXPECT_EQ(first.headers.get("x-cache"), "MISS");
+    EXPECT_EQ(second.headers.get("x-cache"), "HIT");
+    EXPECT_EQ(calls, 1);
+
+    const auto head = invoke(router, HttpRequest{.method = HttpMethod::Head,
+                                                 .target = "/cached",
+                                                 .version_major = 1,
+                                                 .version_minor = 1,
+                                                 .headers = {},
+                                                 .body = {}});
+    EXPECT_EQ(head.headers.get("x-cache"), "HIT");
+    EXPECT_EQ(head.serialize(true).find("cached\n"), std::string::npos);
+    EXPECT_EQ(calls, 1);
+
+    auto sensitive = get;
+    sensitive.headers.add("Authorization", "Bearer secret");
+    EXPECT_EQ(invoke(router, std::move(sensitive)).headers.get("x-cache"), "BYPASS");
+    EXPECT_EQ(calls, 2);
+    EXPECT_NE(router.cacheMetrics().find("operation=\"hit\"} 2"), std::string::npos);
 }
 
 }  // namespace

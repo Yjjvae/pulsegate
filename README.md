@@ -2,8 +2,8 @@
 
 PulseGate 是一个用 C++20 和 Boost.Asio 逐步实现的 HTTP 网关学习项目。
 
-当前开发进度是教程第 14 章“Token Bucket 限流”。当前开发版本为 `0.8.0`；最近发布
-标签为 `v0.7.0`。主程序使用一个 `io_context` 和可配置数量的工作线程；每条
+当前开发进度是教程第 15 章“分片 LRU + TTL 响应缓存”。当前开发版本为 `0.8.1`；最近发布
+标签为 `v0.8.0`。主程序使用一个 `io_context` 和可配置数量的工作线程；每条
 Session 仍有自己的 strand，因此并发不会让单条连接的状态并行修改。
 
 完整教学见 [PROJECT_TUTORIAL.md](PROJECT_TUTORIAL.md)。
@@ -30,6 +30,7 @@ Session 仍有自己的 strand，因此并发不会让单条连接的状态并�
 - `async_resolve` / `async_connect` 协程代理、Round Robin 上游选择和结构化 502/503/504 映射；
 - 上游响应 Parser（Content-Length、chunked、1xx、EOF 边界与上限），以及受控 chunked 下游流式写入；
 - Token Bucket 全局/路由限流：支持按客户端 IP 分桶、分片 TTL 清理、最大 key 数、429/Retry-After 与聚合拒绝指标；
+- 路由显式启用的分片 LRU + TTL 响应缓存：按总字节数有界淘汰，保护 Authorization/Cookie/Set-Cookie 等敏感响应；
 - GoogleTest + CTest；
 - Debug、Release、ASan/UBSan、TSan 独立预设；
 - clang-format、clang-tidy 与 GitHub 协作模板。
@@ -144,6 +145,23 @@ mock 输出中两条业务请求应具有同一个 `connection=N`；健康检查
 超额请求返回 `429 Too Many Requests` 和向上取整的 `Retry-After` 秒数。`/metrics`
 额外输出 `pulsegate_rate_limit_requests_total`，仅以 `scope`（global/route）和
 `outcome`（allowed/rejected/key_capacity）聚合，绝不把 IP 用作标签。
+
+为 `/proxy/*` 启用缓存时，TTL 和总容量必须成对指定。缓存只接受 GET 的 200 响应；HEAD
+只读取已有的 GET 缓存，绝不会用无 Body 的 HEAD 响应覆盖它。带 `Authorization`、`Cookie` 的
+请求，以及带 `Set-Cookie`、`Cache-Control: private/no-store` 或 `Vary: *` 的响应都不会缓存：
+
+```bash
+./build/debug/app/pulsegate --listen 127.0.0.1:8080 --threads 4 \
+  --proxy-upstream 127.0.0.1:9001 \
+  --proxy-cache-ttl-ms 30000 --proxy-cache-max-bytes 4194304 \
+  --proxy-cache-entry-max-bytes 262144 --proxy-cache-shards 16
+```
+
+缓存 key 包含固定 `http` scheme、规范化 Host、路径、Query 和可配置的 Vary 请求头；当前 CLI
+未开放自定义 Vary，因此默认不按额外 Header 分片。命中响应附带 `X-Cache: HIT`，成功填充为
+`MISS`，不满足策略或容量时为 `BYPASS`。启用缓存的代理 miss 会完整缓冲上游响应，确保只有可接受
+的完整 200 响应入缓存；未启用缓存时仍使用原有流式代理路径。`/metrics` 同时输出
+`pulsegate_response_cache_operations_total` 的 hit/miss/store/eviction/expired 聚合计数。
 
 第 6 章同步基线仍保留为独立学习程序：
 

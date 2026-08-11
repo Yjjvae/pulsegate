@@ -14,6 +14,7 @@
 #include "pulsegate/http/http_request.h"
 #include "pulsegate/http/http_response.h"
 #include "pulsegate/http/rate_limiter.h"
+#include "pulsegate/http/response_cache.h"
 #include "pulsegate/net/asio_types.h"
 
 namespace pulsegate::http {
@@ -30,6 +31,9 @@ struct RequestContext {
     // invokes it only from its own executor when shutdown/close is observed.
     std::function<void(std::weak_ptr<ProxySession>)> set_current_proxy;
     std::function<net::Awaitable<bool>(std::string)> write_downstream;
+    // Cache-enabled proxy routes use their complete-response path on a miss so
+    // the Router can decide whether the response is eligible for storage.
+    bool buffer_response_for_cache{false};
 };
 
 using HttpHandler = std::function<net::Awaitable<HttpResponse>(RequestContext&, HttpRequest)>;
@@ -47,15 +51,18 @@ class Router {
     explicit Router(std::optional<RateLimitConfig> global_rate_limit = std::nullopt);
 
     // Configure before serving or publish a new immutable route-table snapshot.
-    void add(Route route, std::optional<RateLimitConfig> rate_limit = std::nullopt);
+    void add(Route route, std::optional<RateLimitConfig> rate_limit = std::nullopt,
+             std::optional<ResponseCacheConfig> cache = std::nullopt);
     [[nodiscard]] std::optional<Route> match(HttpMethod method, std::string_view target) const;
     net::Awaitable<HttpResponse> handle(RequestContext& context, HttpRequest request) const;
     [[nodiscard]] std::string nextRequestId();
     [[nodiscard]] std::string rateLimitMetrics() const;
+    [[nodiscard]] std::string cacheMetrics() const;
 
    private:
     using Routes = std::vector<Route>;
     using RouteLimiters = std::unordered_map<std::string, std::shared_ptr<RateLimiter>>;
+    using RouteCaches = std::unordered_map<std::string, std::shared_ptr<ResponseCache>>;
 
     [[nodiscard]] static std::string_view pathPart(std::string_view target) noexcept;
     [[nodiscard]] static bool routeMatches(const Route& route, HttpMethod method,
@@ -67,6 +74,7 @@ class Router {
 
     std::atomic<std::shared_ptr<const Routes>> routes_;
     std::atomic<std::shared_ptr<const RouteLimiters>> route_limiters_;
+    std::atomic<std::shared_ptr<const RouteCaches>> route_caches_;
     std::mutex update_mutex_;
     std::shared_ptr<RateLimiter> global_limiter_;
     std::atomic_uint64_t next_request_id_{1};
