@@ -1,11 +1,14 @@
+#include <algorithm>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/signal_set.hpp>
 #include <charconv>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <exception>
 #include <filesystem>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -96,6 +99,16 @@ std::size_t parseThreadCount(std::string_view value) {
     return count;
 }
 
+std::size_t parsePositiveSize(std::string_view value, std::string_view option) {
+    std::uint64_t parsed = 0;
+    const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), parsed);
+    if (value.empty() || error != std::errc{} || end != value.data() + value.size() ||
+        parsed == 0 || parsed > std::numeric_limits<std::size_t>::max()) {
+        throw std::invalid_argument(std::string(option) + " must be a positive integer");
+    }
+    return static_cast<std::size_t>(parsed);
+}
+
 std::size_t defaultThreadCount() {
     const auto detected = std::thread::hardware_concurrency();
     return detected == 0 ? 1U : static_cast<std::size_t>(detected);
@@ -121,6 +134,8 @@ void printUsage(std::ostream& output) {
               "[--proxy-upstream HOST:PORT] "
               "[--rate-limit RPS --rate-burst N [--rate-per-client]] "
               "[--proxy-rate-limit RPS --proxy-rate-burst N [--proxy-rate-per-client]] "
+              "[--proxy-cache-ttl-ms N --proxy-cache-max-bytes N "
+              "[--proxy-cache-entry-max-bytes N] [--proxy-cache-shards N]] "
               "[--help | --version]\n\n"
            << "Multi-threaded Boost.Asio coroutine HTTP server.\n"
            << "Example: pulsegate --listen 127.0.0.1:8080 --threads 4\n";
@@ -140,6 +155,10 @@ int main(int argc, char* argv[]) {
         std::optional<double> proxy_rate_limit;
         std::optional<double> proxy_rate_burst;
         bool proxy_rate_per_client = false;
+        std::optional<std::size_t> proxy_cache_ttl_ms;
+        std::optional<std::size_t> proxy_cache_max_bytes;
+        std::optional<std::size_t> proxy_cache_entry_max_bytes;
+        std::optional<std::size_t> proxy_cache_shards;
         std::vector<std::shared_ptr<pulsegate::http::HealthChecker>> health_checkers;
         std::vector<pulsegate::http::ReverseProxy> reverse_proxies;
         for (int index = 1; index < argc; ++index) {
@@ -196,6 +215,23 @@ int main(int argc, char* argv[]) {
                 proxy_rate_per_client = true;
                 continue;
             }
+            if (argument == "--proxy-cache-ttl-ms" && index + 1 < argc) {
+                proxy_cache_ttl_ms = parsePositiveSize(argv[++index], "--proxy-cache-ttl-ms");
+                continue;
+            }
+            if (argument == "--proxy-cache-max-bytes" && index + 1 < argc) {
+                proxy_cache_max_bytes = parsePositiveSize(argv[++index], "--proxy-cache-max-bytes");
+                continue;
+            }
+            if (argument == "--proxy-cache-entry-max-bytes" && index + 1 < argc) {
+                proxy_cache_entry_max_bytes =
+                    parsePositiveSize(argv[++index], "--proxy-cache-entry-max-bytes");
+                continue;
+            }
+            if (argument == "--proxy-cache-shards" && index + 1 < argc) {
+                proxy_cache_shards = parsePositiveSize(argv[++index], "--proxy-cache-shards");
+                continue;
+            }
             throw std::invalid_argument("unknown or incomplete argument: " + std::string(argument));
         }
 
@@ -205,6 +241,15 @@ int main(int argc, char* argv[]) {
         if (proxy_rate_limit.has_value() != proxy_rate_burst.has_value()) {
             throw std::invalid_argument(
                 "--proxy-rate-limit and --proxy-rate-burst must be used together");
+        }
+        if (proxy_cache_ttl_ms.has_value() != proxy_cache_max_bytes.has_value()) {
+            throw std::invalid_argument(
+                "--proxy-cache-ttl-ms and --proxy-cache-max-bytes must be used together");
+        }
+        if ((proxy_cache_entry_max_bytes || proxy_cache_shards) && !proxy_cache_ttl_ms) {
+            throw std::invalid_argument(
+                "proxy cache entry and shard options require --proxy-cache-ttl-ms and "
+                "--proxy-cache-max-bytes");
         }
         std::optional<pulsegate::http::RateLimitConfig> global_rate_limit;
         if (rate_limit) {
@@ -218,6 +263,28 @@ int main(int argc, char* argv[]) {
                 pulsegate::http::RateLimitConfig{.requests_per_second = *proxy_rate_limit,
                                                  .burst = *proxy_rate_burst,
                                                  .per_client = proxy_rate_per_client};
+        }
+        std::optional<pulsegate::http::ResponseCacheConfig> proxy_cache;
+        if (proxy_cache_ttl_ms) {
+            const auto max_bytes = *proxy_cache_max_bytes;
+            const auto max_entry_bytes =
+                proxy_cache_entry_max_bytes.value_or(std::min<std::size_t>(256 * 1024, max_bytes));
+            const auto shards =
+                proxy_cache_shards.value_or(std::min<std::size_t>(16, max_bytes / max_entry_bytes));
+            if (max_entry_bytes > max_bytes) {
+                throw std::invalid_argument(
+                    "--proxy-cache-entry-max-bytes cannot exceed cache size");
+            }
+            if (max_entry_bytes > max_bytes / shards) {
+                throw std::invalid_argument(
+                    "--proxy-cache-entry-max-bytes is too large for the selected shard count");
+            }
+            proxy_cache = pulsegate::http::ResponseCacheConfig{
+                .ttl = std::chrono::milliseconds(*proxy_cache_ttl_ms),
+                .max_entry_bytes = max_entry_bytes,
+                .max_bytes = max_bytes,
+                .shard_count = shards,
+                .vary_headers = {}};
         }
 
         pulsegate::runtime::AsioRuntime runtime(thread_count);
@@ -249,8 +316,8 @@ int main(int argc, char* argv[]) {
             checker->start();
             health_checkers.push_back(std::move(checker));
             reverse_proxies.push_back(proxy);
-            const auto add_proxy = [&router, proxy,
-                                    proxy_route_limit](pulsegate::http::HttpMethod method) {
+            const auto add_proxy = [&router, proxy, proxy_route_limit,
+                                    proxy_cache](pulsegate::http::HttpMethod method) {
                 router->add(
                     pulsegate::http::Route{
                         .method = method,
@@ -262,7 +329,7 @@ int main(int argc, char* argv[]) {
                             -> pulsegate::net::Awaitable<pulsegate::http::HttpResponse> {
                             co_return co_await proxy(context, std::move(request));
                         }},
-                    proxy_route_limit);
+                    proxy_route_limit, proxy_cache);
             };
             add_proxy(pulsegate::http::HttpMethod::Get);
             add_proxy(pulsegate::http::HttpMethod::Head);
