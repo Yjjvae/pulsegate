@@ -123,10 +123,12 @@ class MultiThreadedRunningServer {
 class MockUpstream {
    public:
     explicit MockUpstream(std::vector<std::string> response_fragments,
-                          std::size_t requests_to_serve = 1)
+                          std::size_t requests_to_serve = 1,
+                          std::chrono::milliseconds response_delay = std::chrono::milliseconds(0))
         : acceptor_(context_, tcp::endpoint(asio::ip::make_address("127.0.0.1"), 0)),
           response_fragments_(std::move(response_fragments)),
-          requests_to_serve_(requests_to_serve) {
+          requests_to_serve_(requests_to_serve),
+          response_delay_(response_delay) {
         socket_ = std::make_shared<tcp::socket>(context_);
         thread_ = std::jthread([this] {
             try {
@@ -166,6 +168,10 @@ class MockUpstream {
                         }
                     }
                     request_.append(current_request);
+                    request_started_.store(true, std::memory_order_release);
+                    if (response_delay_ > std::chrono::milliseconds::zero()) {
+                        std::this_thread::sleep_for(response_delay_);
+                    }
                     for (const auto& fragment : response_fragments_) {
                         asio::write(*socket_, asio::buffer(fragment));
                     }
@@ -195,6 +201,9 @@ class MockUpstream {
     [[nodiscard]] bool received() const {
         return received_.load(std::memory_order_acquire);
     }
+    [[nodiscard]] bool requestStarted() const {
+        return request_started_.load(std::memory_order_acquire);
+    }
     [[nodiscard]] std::size_t connectionCount() const {
         return connection_count_.load(std::memory_order_relaxed);
     }
@@ -204,8 +213,10 @@ class MockUpstream {
     tcp::acceptor acceptor_;
     std::vector<std::string> response_fragments_;
     std::size_t requests_to_serve_;
+    std::chrono::milliseconds response_delay_;
     std::string request_;
     std::atomic_bool received_{false};
+    std::atomic_bool request_started_{false};
     std::atomic_size_t connection_count_{0};
     std::shared_ptr<tcp::socket> socket_;
     std::jthread thread_;
@@ -216,13 +227,17 @@ class ProxyRunningServer {
     explicit ProxyRunningServer(
         std::vector<pulsegate::http::UpstreamEndpoint> upstreams,
         std::optional<pulsegate::http::RateLimitConfig> rate_limit = std::nullopt,
-        std::optional<pulsegate::http::ResponseCacheConfig> cache = std::nullopt)
+        std::optional<pulsegate::http::ResponseCacheConfig> cache = std::nullopt,
+        std::optional<pulsegate::http::ProxyLimits> proxy_limits = std::nullopt)
         : router_(std::make_shared<pulsegate::http::Router>()),
           proxy_(std::move(upstreams),
-                 [] {
+                 [proxy_limits] {
                      pulsegate::http::ProxyLimits limits;
-                     limits.pool_limits.max_connections = 1;
-                     limits.pool_limits.max_idle_connections = 1;
+                     if (proxy_limits) limits = *proxy_limits;
+                     if (!proxy_limits) {
+                         limits.pool_limits.max_connections = 1;
+                         limits.pool_limits.max_idle_connections = 1;
+                     }
                      return limits;
                  }()),
           server_(context_, ListenConfig{.host = "127.0.0.1", .port = 0},
@@ -612,7 +627,7 @@ TEST(AsyncHttpServerTest, ServesDefaultAsyncRoutesAndSplitEchoBody) {
 
     const auto version = exchange(
         server, {"GET /api/version HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"});
-    EXPECT_NE(version.find("0.8.1\n"), std::string::npos);
+    EXPECT_NE(version.find("0.8.2\n"), std::string::npos);
 
     const auto metrics =
         exchange(server, {"GET /metrics HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"});
@@ -742,6 +757,89 @@ TEST(AsyncHttpServerTest, CacheHitAvoidsASecondProxyRequestToTheUpstream) {
     EXPECT_EQ(upstream.connectionCount(), 1U);
     EXPECT_EQ(upstream.request().find("GET /proxy/cached"),
               upstream.request().rfind("GET /proxy/cached"));
+}
+
+TEST(AsyncHttpServerTest, CircuitOpenRejectsBeforeAFourthFailureReachesUpstream) {
+    MockUpstream upstream({"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 4\r\n"
+                           "Connection: keep-alive\r\n\r\nfail"},
+                          3);
+    const auto endpoint = upstream.endpoint();
+    pulsegate::http::ProxyLimits limits;
+    limits.health_thresholds = {.healthy_threshold = 1, .unhealthy_threshold = 3};
+    limits.circuit_breaker = {
+        .failure_threshold = 3, .cooldown = std::chrono::seconds(5), .half_open_max_probes = 1};
+    limits.pool_limits.max_connections = 1;
+    limits.pool_limits.max_idle_connections = 1;
+    ProxyRunningServer gateway(
+        {{.host = endpoint.address().to_string(), .service = std::to_string(endpoint.port())}},
+        std::nullopt, std::nullopt, limits);
+
+    for (const auto path : {"/proxy/one", "/proxy/two", "/proxy/three"}) {
+        const auto response = exchange(gateway, {std::string("GET ") + path +
+                                                 " HTTP/1.1\r\nHost: demo\r\n"
+                                                 "Connection: close\r\n\r\n"});
+        EXPECT_NE(response.find("HTTP/1.1 500 Internal Server Error\r\n"), std::string::npos);
+    }
+    const auto rejected =
+        exchange(gateway, {"GET /proxy/four HTTP/1.1\r\nHost: demo\r\nConnection: close\r\n\r\n"});
+
+    EXPECT_NE(rejected.find("HTTP/1.1 503 Service Unavailable\r\n"), std::string::npos);
+    EXPECT_NE(rejected.find("retry-after: 5\r\n"), std::string::npos);
+    EXPECT_TRUE(waitUntil([&upstream] { return upstream.received(); }));
+    EXPECT_EQ(upstream.request().find("GET /proxy/four"), std::string::npos);
+}
+
+TEST(AsyncHttpServerTest, ConfiguredFiveHundredsDoNotTripCircuitWhenExcludedFromFailures) {
+    MockUpstream upstream({"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 4\r\n"
+                           "Connection: keep-alive\r\n\r\nfail"},
+                          4);
+    const auto endpoint = upstream.endpoint();
+    pulsegate::http::ProxyLimits limits;
+    limits.count_5xx_as_health_failure = false;
+    limits.health_thresholds = {.healthy_threshold = 1, .unhealthy_threshold = 1};
+    limits.circuit_breaker = {
+        .failure_threshold = 1, .cooldown = std::chrono::seconds(5), .half_open_max_probes = 1};
+    limits.pool_limits.max_connections = 1;
+    limits.pool_limits.max_idle_connections = 1;
+    ProxyRunningServer gateway(
+        {{.host = endpoint.address().to_string(), .service = std::to_string(endpoint.port())}},
+        std::nullopt, std::nullopt, limits);
+
+    for (const auto path : {"/proxy/one", "/proxy/two", "/proxy/three", "/proxy/four"}) {
+        const auto response = exchange(gateway, {std::string("GET ") + path +
+                                                 " HTTP/1.1\r\nHost: demo\r\n"
+                                                 "Connection: close\r\n\r\n"});
+        EXPECT_NE(response.find("HTTP/1.1 500 Internal Server Error\r\n"), std::string::npos);
+    }
+    EXPECT_TRUE(waitUntil([&upstream] { return upstream.received(); }));
+}
+
+TEST(AsyncHttpServerTest, InFlightLimitRejectsBeforeSecondRequestReachesUpstreamPool) {
+    MockUpstream upstream({"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK"},
+                          1, std::chrono::milliseconds(100));
+    const auto endpoint = upstream.endpoint();
+    pulsegate::http::ProxyLimits limits;
+    limits.max_in_flight_requests = 1;
+    limits.pool_limits.max_connections = 1;
+    limits.pool_limits.max_idle_connections = 1;
+    ProxyRunningServer gateway(
+        {{.host = endpoint.address().to_string(), .service = std::to_string(endpoint.port())}},
+        std::nullopt, std::nullopt, limits);
+
+    std::string first_response;
+    std::jthread first([&] {
+        first_response = exchange(
+            gateway, {"GET /proxy/first HTTP/1.1\r\nHost: demo\r\nConnection: close\r\n\r\n"});
+    });
+    ASSERT_TRUE(waitUntil([&upstream] { return upstream.requestStarted(); }));
+    const auto rejected = exchange(
+        gateway, {"GET /proxy/second HTTP/1.1\r\nHost: demo\r\nConnection: close\r\n\r\n"});
+    first.join();
+
+    EXPECT_NE(first_response.find("HTTP/1.1 200 OK\r\n"), std::string::npos);
+    EXPECT_NE(rejected.find("HTTP/1.1 503 Service Unavailable\r\n"), std::string::npos);
+    EXPECT_NE(rejected.find("retry-after: 1\r\n"), std::string::npos);
+    EXPECT_EQ(upstream.request().find("GET /proxy/second"), std::string::npos);
 }
 
 TEST(AsyncHttpServerTest, ServesTheSameProtocolWithOneTwoAndFourWorkers) {

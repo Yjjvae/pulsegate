@@ -2,8 +2,8 @@
 
 PulseGate 是一个用 C++20 和 Boost.Asio 逐步实现的 HTTP 网关学习项目。
 
-当前开发进度是教程第 15 章“分片 LRU + TTL 响应缓存”。当前开发版本为 `0.8.1`；最近发布
-标签为 `v0.8.0`。主程序使用一个 `io_context` 和可配置数量的工作线程；每条
+当前开发进度是教程第 16 章“熔断、背压与过载保护”。当前开发版本为 `0.8.2`；最近发布
+标签为 `v0.8.1`。主程序使用一个 `io_context` 和可配置数量的工作线程；每条
 Session 仍有自己的 strand，因此并发不会让单条连接的状态并行修改。
 
 完整教学见 [PROJECT_TUTORIAL.md](PROJECT_TUTORIAL.md)。
@@ -31,6 +31,8 @@ Session 仍有自己的 strand，因此并发不会让单条连接的状态并�
 - 上游响应 Parser（Content-Length、chunked、1xx、EOF 边界与上限），以及受控 chunked 下游流式写入；
 - Token Bucket 全局/路由限流：支持按客户端 IP 分桶、分片 TTL 清理、最大 key 数、429/Retry-After 与聚合拒绝指标；
 - 路由显式启用的分片 LRU + TTL 响应缓存：按总字节数有界淘汰，保护 Authorization/Cookie/Set-Cookie 等敏感响应；
+- 每端点 Closed/Open/Half-Open 熔断器：连续上游失败后快速拒绝，冷却后限制探测请求；
+- 代理全局 in-flight 上限、连接池 waiter 上限与显式 503/Retry-After 过载反馈；
 - GoogleTest + CTest；
 - Debug、Release、ASan/UBSan、TSan 独立预设；
 - clang-format、clang-tidy 与 GitHub 协作模板。
@@ -162,6 +164,14 @@ mock 输出中两条业务请求应具有同一个 `connection=N`；健康检查
 `MISS`，不满足策略或容量时为 `BYPASS`。启用缓存的代理 miss 会完整缓冲上游响应，确保只有可接受
 的完整 200 响应入缓存；未启用缓存时仍使用原有流式代理路径。`/metrics` 同时输出
 `pulsegate_response_cache_operations_total` 的 hit/miss/store/eviction/expired 聚合计数。
+
+代理还在上游连接池之前执行全局 in-flight 准入；达到默认 1024 个活动代理事务时，立即返回
+`503 Service Unavailable` 与 `Retry-After: 1`，不会继续积压协程或创建连接。每个上游端点另有独立
+熔断器：默认连续 3 个**上游**失败（连接、超时、协议错误，或启用了默认策略的 5xx）会进入 Open，
+持续 5 秒；Open 期间不会访问该端点，冷却后只允许 1 个 Half-Open 探测。成功探测恢复 Closed，失败
+探测重新开始冷却。客户端断开、服务器停机、路由限流与池准入失败不计为上游失败。连接池已限制每端点
+连接数和 waiter 数；流式代理每次仅在下游上一块写完后读取下一块上游数据，因此慢下游不会形成无界待写
+队列。当前 CLI 仍使用这些安全默认值，配置文件章节会统一暴露和校验它们。
 
 第 6 章同步基线仍保留为独立学习程序：
 

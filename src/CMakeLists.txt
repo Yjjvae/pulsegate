@@ -80,6 +80,7 @@ target_sources(
   pulsegate_http
   PRIVATE
     http/headers.cpp
+    http/circuit_breaker.cpp
     http/file_service.cpp
     http/health_checker.cpp
     http/http_parser.cpp

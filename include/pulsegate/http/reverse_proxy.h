@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 
+#include "pulsegate/http/circuit_breaker.h"
 #include "pulsegate/http/http_response_parser.h"
 #include "pulsegate/http/router.h"
 #include "pulsegate/http/upstream_endpoint.h"
@@ -27,6 +28,10 @@ struct ProxyLimits {
     std::chrono::milliseconds total_timeout{10000};
     HealthThresholds health_thresholds{};
     PoolLimits pool_limits{};
+    CircuitBreakerLimits circuit_breaker{};
+    // Bounds active proxy transactions across all endpoints of this proxy.
+    std::size_t max_in_flight_requests{1024};
+    std::chrono::seconds overload_retry_after{1};
     bool count_5xx_as_health_failure{true};
 };
 
@@ -60,6 +65,8 @@ enum class ProxyError {
     UpstreamProtocol,
     UpstreamBodyTooLarge,
     NoHealthyUpstream,
+    CircuitOpen,
+    Overloaded,
     Cancelled,
     UnsupportedRequest
 };
@@ -135,11 +142,13 @@ class ReverseProxy {
         std::vector<UpstreamEndpoint> upstreams;
         ProxyLimits limits;
         std::shared_ptr<HealthStateStore> health;
+        std::vector<std::shared_ptr<CircuitBreaker>> circuits;
         [[nodiscard]] std::shared_ptr<UpstreamPool> poolFor(std::size_t index,
                                                             net::asio::any_io_executor executor);
         mutable std::mutex pools_mutex;
         std::vector<std::shared_ptr<UpstreamPool>> pools;
         std::atomic<std::size_t> next{0};
+        std::atomic<std::size_t> in_flight{0};
     };
     std::shared_ptr<State> state_;
 };
