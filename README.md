@@ -303,6 +303,22 @@ cmake --build --preset asio-tracking
 ./build/asio-tracking/app/pulsegate --listen 127.0.0.1:8080
 ```
 
+## 性能基准
+
+第 22 章提供可复现的 Release `/healthz` worker 对照脚本。它会关闭 access log、预热后运行多轮
+`wrk`，并保存原始输出及服务端 CPU/RSS 采样；结果目录默认不纳入版本控制。
+
+```bash
+cmake --preset release
+cmake --build --preset release
+tools/benchmark.sh --workers 1,2,4,8 --trials 3 \
+  --connections 100 --load-threads 2 --warmup 5s --duration 15s
+```
+
+完整方法、实测数据与局限见
+[v0.9.3 `/healthz` 多 Worker 基线](docs/benchmarks/v0.9.3-healthz-baseline.md)。不要将单机回环 RPS
+外推为生产性能，也不要在没有 profile 证据时改动热路径。
+
 ## 开发检查
 
 格式化本阶段源码：

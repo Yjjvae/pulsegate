@@ -778,6 +778,33 @@
   再附一个确定性 GoogleTest 回归；
 - clang-tidy 先做真实、可重复的报告而不是一开始强制全项目零告警。稳定检查会在 CI 章节按基线逐步收紧。
 
+## 2026-08-12
+
+### 第二十二章：性能测试与逐步优化
+
+完成内容：
+
+- 新增 `tools/benchmark.sh`：自动生成 logging=critical 的临时配置，启动 Release PulseGate、确认
+  `/healthz`、预热、执行多轮 `wrk`，并保存原始输出、环境元数据和按秒 CPU/RSS 采样；
+- 新增 `benchmarks/` 说明及被忽略的原始结果目录，防止机器相关结果污染仓库，同时将方法和结论固化到
+  `docs/benchmarks/v0.9.3-healthz-baseline.md`；
+- 在 WSL2 / Ryzen 7 8845H（16 逻辑 CPU）运行 1/2/4/8 worker、100 connections、2 wrk threads、
+  5 秒预热、3×15 秒的完整 Release 回环矩阵；开发版本保持 `0.9.3`。
+
+验证结果：
+
+- 各组 3 次 wrk 输出均未出现 socket error 或 non-2xx；4 worker 的中位值为 **309,868.85 RPS**、
+  **463 µs P99**，优于 1、2、8 worker；8 worker 降至 255,336.30 RPS，证明更多 worker 不等于更高吞吐；
+- Release 构建成功；脚本经 `bash -n` 和一次短时 end-to-end smoke 验证；完整矩阵的原始数据保留在本机
+  `/tmp`，版本化报告保留全部参数、环境和汇总结果；
+- 当前 WSL2 环境没有匹配 `perf` 的可执行程序，因此未伪造 profile 结论，也未在没有热点证据时修改热路径。
+
+重要决策：
+
+- 基准使用中位数及三次原始值，不挑选最高 RPS；服务端和负载端同机的限制被明确写入报告；
+- 默认 worker 数不因单个 `/healthz` 实验改动。真实 proxy、cache、日志和容器负载应以独立 profile 和
+  before/after 矩阵决定；本章优先建立可信的证据链，而不是无依据的微优化。
+
 ## 后续记录模板
 
 ```markdown
