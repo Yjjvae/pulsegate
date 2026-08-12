@@ -81,6 +81,7 @@ target_sources(
   PRIVATE
     http/headers.cpp
     http/circuit_breaker.cpp
+    http/config.cpp
     http/file_service.cpp
     http/health_checker.cpp
     http/http_parser.cpp
@@ -108,4 +109,5 @@ target_link_libraries(
   PUBLIC
     PulseGate::core
     PulseGate::net
+    yaml-cpp
 )

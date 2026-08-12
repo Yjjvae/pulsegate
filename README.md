@@ -2,8 +2,8 @@
 
 PulseGate 是一个用 C++20 和 Boost.Asio 逐步实现的 HTTP 网关学习项目。
 
-当前开发进度是教程第 16 章“熔断、背压与过载保护”。当前开发版本为 `0.8.2`；最近发布
-标签为 `v0.8.1`。主程序使用一个 `io_context` 和可配置数量的工作线程；每条
+当前开发进度是教程第 17 章“配置管理”。当前开发版本为 `0.9.0`；最近发布
+标签为 `v0.8.2`。主程序使用一个 `io_context` 和可配置数量的工作线程；每条
 Session 仍有自己的 strand，因此并发不会让单条连接的状态并行修改。
 
 完整教学见 [PROJECT_TUTORIAL.md](PROJECT_TUTORIAL.md)。
@@ -33,6 +33,7 @@ Session 仍有自己的 strand，因此并发不会让单条连接的状态并�
 - 路由显式启用的分片 LRU + TTL 响应缓存：按总字节数有界淘汰，保护 Authorization/Cookie/Set-Cookie 等敏感响应；
 - 每端点 Closed/Open/Half-Open 熔断器：连续上游失败后快速拒绝，冷却后限制探测请求；
 - 代理全局 in-flight 上限、连接池 waiter 上限与显式 503/Retry-After 过载反馈；
+- 集中管理、固定版本的 yaml-cpp 配置依赖；YAML 配置解析、聚合校验与不可变 reload 快照；
 - GoogleTest + CTest；
 - Debug、Release、ASan/UBSan、TSan 独立预设；
 - clang-format、clang-tidy 与 GitHub 协作模板。
@@ -172,6 +173,26 @@ mock 输出中两条业务请求应具有同一个 `connection=N`；健康检查
 探测重新开始冷却。客户端断开、服务器停机、路由限流与池准入失败不计为上游失败。连接池已限制每端点
 连接数和 waiter 数；流式代理每次仅在下游上一块写完后读取下一块上游数据，因此慢下游不会形成无界待写
 队列。当前 CLI 仍使用这些安全默认值，配置文件章节会统一暴露和校验它们。
+
+## YAML 配置
+
+第 17 章新增 `--config FILE`。配置文件是 CLI 参数的替代入口，不能与其他运行参数混用；完整示例见
+[config/pulsegate.example.yaml](config/pulsegate.example.yaml)。
+
+```bash
+cmake --preset debug
+cmake --build --preset debug
+./build/debug/app/pulsegate --config ./config/pulsegate.example.yaml
+```
+
+加载分为解析和校验两个阶段。错误一次性列出并带字段路径，例如未知 upstream、重复 endpoint、无效端口、
+不合法的缓存 shard 预算，或 `output_low_water_bytes >= output_high_water_bytes`。yaml-cpp 固定为官方
+`0.8.0` 提交并只由 `cmake/Dependencies.cmake` 管理。
+
+进程收到 `SIGHUP` 时，`ConfigManager` 在专用 worker 解析候选配置、回到配置 strand 校验并原子发布
+不可变快照；解析/校验失败时保留旧快照。监听地址、I/O 线程、Session 限制、上游和路由会明确提示
+“需要重启”，不会产生只更新部分运行对象的危险热更新。当前唯一可安全发布的热更新字段是 logging 元数据；
+第 18 章把日志消费者接入后会使该更新生效。
 
 第 6 章同步基线仍保留为独立学习程序：
 
