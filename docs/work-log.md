@@ -744,6 +744,40 @@
   `io_context` 过早返回而遗漏取消处理、连接清理或 access log；
 - `io_context.stop()` 不作为正常优雅关闭路径。它仍只保留给无法自然收敛时的外部强制兜底。
 
+## 2026-08-12
+
+### 第二十、二十一章：测试体系与质量工具
+
+完成内容：
+
+- 盘点并保留既有的 123 项确定性单元/回环集成测试；其范围覆盖解析、超时、连接生命周期、多 worker strand、
+  代理、连接池、限流、缓存、熔断、配置、观测与优雅停机；
+- 新增 Clang 专用 `fuzz` CMake preset、HTTP Parser libFuzzer 目标、HTTP 词典与语料目录。fuzzer 同时以
+  单缓冲和确定性分块输入驱动 Parser，并检查 Complete 状态与可移动的请求不变量；
+- 新增可复用 Clang toolchain 文件：自动使用当前 `g++` 对应的 libstdc++ 安装目录，避免主机存在不完整新版
+  GCC runtime 时 Clang 链接到错误目录；
+- 新增 `clang-tidy` Clang 构建预设；`.clang-tidy` 启用 concurrency 分析，并明确排除项目有意采用的
+  `#pragma once` 和会改变公共 ABI 的 enum-size 建议；静态分析先记录非阻断基线，尚不把历史告警设为 error；
+- 新增 Debug-only `asio-tracking` 预设和 `PULSEGATE_ENABLE_ASIO_HANDLER_TRACKING` 开关；Release 非法启用时
+  CMake 明确拒绝，防止调试跟踪污染性能测试；开发版本升级至 `0.9.3`，README 记录运行命令与 crash 回归流程。
+
+验证结果：
+
+- `clang++-21` 通过新 toolchain 成功配置并构建完整项目，`clang-tidy` 能消费其 compilation database；
+  HTTP Parser 基线报告正常产生，当前不作为零告警门禁；
+- 安装 `libclang-rt-21-dev` 后，修正运行时探测以匹配 Ubuntu 的架构后缀文件名
+  `libclang_rt.fuzzer-x86_64.a`；`fuzz` preset 成功完成配置和构建；
+- HTTP Parser 在临时语料副本上完成 **10,000 次** libFuzzer smoke run，覆盖增长至 144 个 feature，
+  未发现 ASan/UBSan 错误。受控终端会被 LeakSanitizer 识别为 ptrace，因此该次 smoke 仅以
+  `ASAN_OPTIONS=detect_leaks=0` 关闭 leak 检测；正常本机/CI 运行仍保持默认 leak 检测；
+- 文档将 smoke 命令改为临时语料和 artifact 目录，避免 libFuzzer 的覆盖样本污染受版本控制的 seed corpus。
+
+重要决策：
+
+- 模糊测试使用单独 Clang 构建树，绝不与普通 ASan/TSan 混用；每个 future crash 都必须最小化并落入 corpus，
+  再附一个确定性 GoogleTest 回归；
+- clang-tidy 先做真实、可重复的报告而不是一开始强制全项目零告警。稳定检查会在 CI 章节按基线逐步收紧。
+
 ## 后续记录模板
 
 ```markdown
