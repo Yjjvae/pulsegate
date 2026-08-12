@@ -144,6 +144,7 @@ TEST(ConfigManagerTest, PublishesDynamicChangeButKeepsSnapshotOnStaticChange) {
     EXPECT_FALSE(second_result.published);
     EXPECT_EQ(second_result.restart_required, std::vector<std::string>{"server.listen_port"});
     EXPECT_EQ(manager->snapshot()->value.server.listen_port, 8080U);
+    manager.reset();
     guard.reset();
     runner.join();
 }

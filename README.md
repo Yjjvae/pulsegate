@@ -2,7 +2,7 @@
 
 PulseGate 是一个用 C++20 和 Boost.Asio 逐步实现的 HTTP 网关学习项目。
 
-当前开发进度是教程第 17 章“配置管理”。当前开发版本为 `0.9.0`；最近发布
+当前开发进度是教程第 18 章“日志与可观测性”。当前开发版本为 `0.9.1`；最近发布
 标签为 `v0.8.2`。主程序使用一个 `io_context` 和可配置数量的工作线程；每条
 Session 仍有自己的 strand，因此并发不会让单条连接的状态并行修改。
 
@@ -34,6 +34,7 @@ Session 仍有自己的 strand，因此并发不会让单条连接的状态并�
 - 每端点 Closed/Open/Half-Open 熔断器：连续上游失败后快速拒绝，冷却后限制探测请求；
 - 代理全局 in-flight 上限、连接池 waiter 上限与显式 503/Retry-After 过载反馈；
 - 集中管理、固定版本的 yaml-cpp 配置依赖；YAML 配置解析、聚合校验与不可变 reload 快照；
+- 有界异步 JSON/text access log、日志丢弃计数，以及低基数 Prometheus `/metrics`；
 - GoogleTest + CTest；
 - Debug、Release、ASan/UBSan、TSan 独立预设；
 - clang-format、clang-tidy 与 GitHub 协作模板。
@@ -192,7 +193,20 @@ cmake --build --preset debug
 进程收到 `SIGHUP` 时，`ConfigManager` 在专用 worker 解析候选配置、回到配置 strand 校验并原子发布
 不可变快照；解析/校验失败时保留旧快照。监听地址、I/O 线程、Session 限制、上游和路由会明确提示
 “需要重启”，不会产生只更新部分运行对象的危险热更新。当前唯一可安全发布的热更新字段是 logging 元数据；
-第 18 章把日志消费者接入后会使该更新生效。
+第 18 章已将它接入异步 access logger。
+
+## 日志与可观测性
+
+每个已完成请求都会产生 access log。日志只保留请求 ID、方法、**不含 Query 的路径**、状态码、耗时、
+输入/输出字节数、上游和缓存结果；不会记录 Authorization、Cookie 或请求 Body。请求耗时使用
+`steady_clock`。`AsyncLogger` 在专用线程写出 JSON（或 YAML 配置的 `text` 格式），队列默认最多 4096 条；
+队满时直接丢弃新日志，不阻塞 `io_context`，并增加 `pulsegate_logs_dropped_total`。SIGHUP 成功发布新的
+logging 快照后，日志级别和格式会随即更新。
+
+`/metrics` 采用 Prometheus text 格式，包含 HTTP 请求计数与耗时直方图、连接接受/拒绝与活动数、上游
+请求/连接耗时、缓存、限流、熔断状态、活跃协程、连接池 waiter、输出 Buffer 与日志丢弃计数。指标标签
+只使用 HTTP 方法、状态类别、路由名和配置的上游名；不会使用 request ID、客户端 IP、用户 ID 或完整
+URL，避免不可控的时序数据基数。
 
 第 6 章同步基线仍保留为独立学习程序：
 

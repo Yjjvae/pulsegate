@@ -677,6 +677,44 @@
 - 第 18 章接入指标与结构化日志时，将消费日志配置快照，并记录重载成功、失败和“需要重启”的次数；
 - 未来可为路由和上游引入不可变运行时对象与 drain 协议，届时再逐步扩大允许热更新的配置范围。
 
+## 2026-08-12
+
+### 第十八章：日志与可观测性
+
+完成内容：
+
+- 新增项目自有的 `Observability` 边界，避免 HTTP、Router 和 Proxy 直接依赖某个第三方日志库；
+- `AsyncLogger` 在专用 `std::jthread` 消费有界队列，输出 JSON 或 text access log。队满时丢弃新日志，
+  不让文件/终端写入阻塞 `io_context`；每条记录只含 request ID、方法、去掉 Query 的路径、状态、
+  steady-clock 耗时、字节数、上游和缓存状态，不含 Cookie、Authorization 或 Body；
+- 接入 YAML `logging.level` 和 `logging.format`：配置启动时生效，SIGHUP 成功发布 logging 快照后更新
+  logger；
+- 新增低基数 `MetricsRegistry` 和 Prometheus text `/metrics`：HTTP 请求计数与直方图、连接接受/拒绝/
+  活跃数、上游请求与连接耗时、缓存、限流、熔断状态、活跃协程、Pool waiter、输出 Buffer、日志丢弃；
+- Server、Router 与 Proxy 在请求完成、限流/缓存决策、连接准入、代理结果和熔断状态变化处写入统一指标；
+  指标不使用 request ID、IP、用户 ID 或完整 URL；开发版本升级至 `0.9.1`。
+
+验证结果：
+
+- 单元测试覆盖异步日志队列的有界丢弃，以及 Prometheus 计数器、直方图和 gauge 的标签与渲染；
+- 集成测试验证 `/metrics` 的新 HTTP、连接和日志丢弃指标；Debug、ASan/UBSan、TSan 完整回环 CTest 均为
+  **119/119 通过**；独立 `-Werror` 与 Release 构建、`clang-format --dry-run --Werror`、
+  `git diff --check` 均通过，Release `--version` 输出 `0.9.1`。
+
+重要决策：
+
+- 先使用项目接口而不是引入 spdlog：当前需求只有 access log，依赖更小，也便于下一步替换 sink；
+- 日志丢弃采用“丢弃新条目”的明确策略，并将其本身暴露为指标；吞吐优先时绝不把磁盘 I/O 回压到网络
+  worker；
+- Prometheus 使用 route name、状态类别等有限标签；直方图桶固定，避免将请求 ID 或原始 Query 变成
+  高基数时间序列。
+
+遗留事项：
+
+- 第十九章会把 ready/draining 状态接到优雅停机状态机；当前 `/readyz` 仍表示已可接受流量；
+- 活跃协程当前统计 HTTP Session 顶层协程；更细粒度的 resolver、proxy 和 timer coroutine 统计可在
+  profile 驱动后再补充。
+
 ## 后续记录模板
 
 ```markdown

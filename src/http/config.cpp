@@ -266,6 +266,15 @@ std::vector<ConfigError> ConfigLoader::validate(const Config& config) const {
     if (config.server.output_low_water_bytes >= config.server.output_high_water_bytes) {
         errors.push_back({"server.output_low_water_bytes", "must be lower than high water"});
     }
+    if (config.logging.level != "trace" && config.logging.level != "debug" &&
+        config.logging.level != "info" && config.logging.level != "warn" &&
+        config.logging.level != "warning" && config.logging.level != "error" &&
+        config.logging.level != "critical") {
+        errors.push_back({"logging.level", "must be trace, debug, info, warn, error, or critical"});
+    }
+    if (config.logging.format != "json" && config.logging.format != "text") {
+        errors.push_back({"logging.format", "must be json or text"});
+    }
 
     std::set<std::string> names;
     for (std::size_t index = 0; index < config.upstreams.size(); ++index) {
