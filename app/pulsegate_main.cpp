@@ -210,9 +210,12 @@ int runFromConfig(const std::filesystem::path& path) {
     const pulsegate::net::ListenConfig listen{
         .host = loaded.server.listen_host,
         .port = static_cast<std::uint16_t>(loaded.server.listen_port)};
+    auto observability = std::make_shared<pulsegate::http::Observability>(
+        pulsegate::http::LoggerConfig{.level = pulsegate::http::parseLogLevel(loaded.logging.level),
+                                      .json = loaded.logging.format == "json"});
     pulsegate::http::HttpServer server(runtime.context(), listen,
                                        pulsegate::http::RouterConfig{std::move(router)},
-                                       sessionLimitsFromConfig(loaded.server));
+                                       sessionLimitsFromConfig(loaded.server), observability);
     const auto endpoint = server.localEndpoint();
     std::cout << "PulseGate listening on " << endpoint.address().to_string() << ':'
               << endpoint.port() << " (config " << path.string() << ")\n";
@@ -220,14 +223,19 @@ int runFromConfig(const std::filesystem::path& path) {
     auto signals =
         std::make_shared<boost::asio::signal_set>(runtime.context(), SIGINT, SIGTERM, SIGHUP);
     auto wait_signal = std::make_shared<std::function<void()>>();
-    *wait_signal = [signals, wait_signal, manager, &server, &runtime, &health_checkers,
-                    &reverse_proxies] {
-        signals->async_wait([signals, wait_signal, manager, &server, &runtime, &health_checkers,
+    *wait_signal = [signals, wait_signal, manager, observability, &server, &runtime,
+                    &health_checkers, &reverse_proxies] {
+        signals->async_wait([signals, wait_signal, manager, observability, &server, &runtime,
+                             &health_checkers,
                              &reverse_proxies](const boost::system::error_code& error, int signal) {
             if (error) return;
             if (signal == SIGHUP) {
-                manager->requestReload([](pulsegate::http::ConfigReloadResult result) {
+                manager->requestReload([manager,
+                                        observability](pulsegate::http::ConfigReloadResult result) {
                     if (result.published) {
+                        const auto logging = manager->snapshot()->value.logging;
+                        observability->setLogging(pulsegate::http::parseLogLevel(logging.level),
+                                                  logging.format == "json");
                         std::cerr << "PulseGate configuration snapshot reloaded\n";
                     } else if (!result.restart_required.empty()) {
                         std::cerr << "PulseGate configuration change requires restart:";

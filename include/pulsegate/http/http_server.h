@@ -37,7 +37,9 @@ struct RouterConfig {
 class HttpSession : public std::enable_shared_from_this<HttpSession> {
    public:
     HttpSession(net::tcp::socket socket, std::shared_ptr<Router> router,
-                std::shared_ptr<SessionRegistry> registry, SessionId id, SessionLimits limits = {});
+                std::shared_ptr<SessionRegistry> registry,
+                std::shared_ptr<Observability> observability, SessionId id,
+                SessionLimits limits = {});
 
     void start();
     void stop(StopReason reason = StopReason::ServerShutdown);
@@ -63,6 +65,7 @@ class HttpSession : public std::enable_shared_from_this<HttpSession> {
     net::Buffer input_;
     HttpParser parser_;
     std::shared_ptr<SessionRegistry> registry_;
+    std::shared_ptr<Observability> observability_;
     SessionId id_;
     std::shared_ptr<net::Deadline> deadline_;
     std::weak_ptr<ProxySession> current_proxy_;
@@ -71,6 +74,7 @@ class HttpSession : public std::enable_shared_from_this<HttpSession> {
     bool reading_{false};
     bool served_request_{false};
     bool close_recorded_{false};
+    std::size_t response_bytes_{0};
 };
 
 class HttpServer {
@@ -78,19 +82,21 @@ class HttpServer {
     HttpServer(net::asio::io_context& context, net::ListenConfig config,
                RequestHandler handler = {}, SessionLimits limits = {});
     HttpServer(net::asio::io_context& context, net::ListenConfig config, RouterConfig router,
-               SessionLimits limits = {});
+               SessionLimits limits = {}, std::shared_ptr<Observability> observability = {});
 
     void start();
     void stop();
     [[nodiscard]] net::tcp::endpoint localEndpoint() const;
     [[nodiscard]] std::size_t connectionCount() const;
     [[nodiscard]] std::size_t closedCount(StopReason reason) const;
+    [[nodiscard]] std::shared_ptr<Observability> observability() const noexcept;
     [[nodiscard]] static std::shared_ptr<Router> makeDefaultRouter(
         std::optional<RateLimitConfig> global_rate_limit = std::nullopt);
 
    private:
     std::shared_ptr<net::Listener> listener_;
     std::shared_ptr<SessionRegistry> registry_;
+    std::shared_ptr<Observability> observability_;
 };
 
 }  // namespace pulsegate::http

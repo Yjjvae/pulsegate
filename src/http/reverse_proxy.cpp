@@ -596,11 +596,14 @@ net::Awaitable<HttpResponse> ReverseProxy::operator()(RequestContext& context,
                                               wait + std::chrono::milliseconds(999))
                                               .count());
             response.headers.add("Retry-After", std::to_string(seconds));
+            if (context.observability)
+                context.observability->metrics().recordUpstream("unavailable", "circuit_open");
             co_return response;
         }
         co_return makeProxyErrorResponse(ProxyError::NoHealthyUpstream);
     }
     const auto pool = state_->poolFor(*index, context.executor);
+    const auto upstream_started = std::chrono::steady_clock::now();
     net::ErrorCode acquire_error;
     auto lease =
         co_await pool->asyncAcquire(net::asio::redirect_error(net::use_awaitable, acquire_error));
@@ -609,6 +612,10 @@ net::Awaitable<HttpResponse> ReverseProxy::operator()(RequestContext& context,
         auto response = makeProxyErrorResponse(ProxyError::Overloaded);
         response.headers.add("Retry-After",
                              std::to_string(state_->limits.overload_retry_after.count()));
+        if (context.observability)
+            context.observability->metrics().recordUpstream(
+                state_->upstreams[*index].host + ":" + state_->upstreams[*index].service,
+                "overloaded");
         co_return response;
     }
     auto session = std::make_shared<ProxySession>(context.executor, state_->upstreams[*index],
@@ -644,6 +651,17 @@ net::Awaitable<HttpResponse> ReverseProxy::operator()(RequestContext& context,
         state_->circuits[*index]->recordFailure();
     } else {
         state_->circuits[*index]->recordNeutral();
+    }
+    if (context.observability) {
+        context.observability->metrics().recordUpstream(
+            id, result.error == ProxyError::None ? "success" : "failure",
+            std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() -
+                                                                  upstream_started));
+        const auto circuit = state_->circuits[*index]->snapshot();
+        const auto state = circuit.state == CircuitState::Closed
+                               ? "closed"
+                               : (circuit.state == CircuitState::Open ? "open" : "half_open");
+        context.observability->metrics().setCircuitState(id, state);
     }
     co_return result.error == ProxyError::None ? result.response
                                                : makeProxyErrorResponse(result.error);

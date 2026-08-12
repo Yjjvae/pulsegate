@@ -61,6 +61,16 @@ void Router::add(Route route, std::optional<RateLimitConfig> rate_limit,
                         std::memory_order_release);
 }
 
+void Router::setObservability(std::shared_ptr<Observability> observability) {
+    std::scoped_lock lock(update_mutex_);
+    observability_ = std::move(observability);
+}
+
+std::shared_ptr<Observability> Router::observability() const {
+    std::scoped_lock lock(update_mutex_);
+    return observability_;
+}
+
 std::optional<Route> Router::match(HttpMethod method, std::string_view target) const {
     const auto path = pathPart(target);
     const auto snapshot = routes_.load(std::memory_order_acquire);
@@ -79,6 +89,8 @@ net::Awaitable<HttpResponse> Router::handle(RequestContext& context, HttpRequest
         if (!decision.allowed) {
             auto response = makeRateLimited(decision);
             response.headers.set("X-Request-Id", context.request_id);
+            context.route_name = "global";
+            if (observability_) observability_->metrics().recordRateLimitRejection("global");
             co_return response;
         }
     }
@@ -107,6 +119,7 @@ net::Awaitable<HttpResponse> Router::handle(RequestContext& context, HttpRequest
             response.headers.add("Allow", allow);
         }
     } else {
+        context.route_name = iterator->name;
         const auto route_limiters = route_limiters_.load(std::memory_order_acquire);
         const auto limiter = route_limiters->find(iterator->name);
         bool allowed = true;
@@ -117,6 +130,7 @@ net::Awaitable<HttpResponse> Router::handle(RequestContext& context, HttpRequest
         }
         if (!allowed) {
             response = makeRateLimited(*decision);
+            if (observability_) observability_->metrics().recordRateLimitRejection(iterator->name);
         } else {
             const auto route_caches = route_caches_.load(std::memory_order_acquire);
             const auto cache = route_caches->find(iterator->name);
@@ -131,6 +145,8 @@ net::Awaitable<HttpResponse> Router::handle(RequestContext& context, HttpRequest
                     response = std::move(*cached);
                     response.headers.set("X-Cache", "HIT");
                     response.headers.set("X-Request-Id", context.request_id);
+                    context.cache_status = "HIT";
+                    if (observability_) observability_->metrics().recordCache("hit");
                     co_return response;
                 }
                 context.buffer_response_for_cache = true;
@@ -146,11 +162,17 @@ net::Awaitable<HttpResponse> Router::handle(RequestContext& context, HttpRequest
                     ResponseCache::cacheableResponse(response, cache->second->config()) &&
                     cache->second->put(std::move(*cache_key), response)) {
                     response.headers.set("X-Cache", "MISS");
+                    context.cache_status = "MISS";
+                    if (observability_) observability_->metrics().recordCache("miss");
                 } else {
                     response.headers.set("X-Cache", "BYPASS");
+                    context.cache_status = "BYPASS";
+                    if (observability_) observability_->metrics().recordCache("bypass");
                 }
             } else if (cache_configured) {
                 response.headers.set("X-Cache", "BYPASS");
+                context.cache_status = "BYPASS";
+                if (observability_) observability_->metrics().recordCache("bypass");
             }
         }
     }
