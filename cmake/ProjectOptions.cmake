@@ -18,3 +18,14 @@ if(PULSEGATE_WARNINGS_AS_ERRORS)
       "$<$<COMPILE_LANG_AND_ID:CXX,MSVC>:/WX>"
   )
 endif()
+
+if(PULSEGATE_ENABLE_ASIO_HANDLER_TRACKING)
+  if(NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
+    message(FATAL_ERROR "Boost.Asio handler tracking is supported only in Debug builds")
+  endif()
+  target_compile_definitions(
+    pulsegate_project_options
+    INTERFACE
+      BOOST_ASIO_ENABLE_HANDLER_TRACKING
+  )
+endif()

@@ -1,0 +1,12 @@
+# libFuzzer dictionary: steer mutations towards HTTP/1.x state transitions.
+method_get="GET "
+method_post="POST "
+target="/healthz"
+version_11=" HTTP/1.1"
+version_10=" HTTP/1.0"
+line_end="\x0d\x0a"
+headers_end="\x0d\x0a\x0d\x0a"
+host="Host: localhost\x0d\x0a"
+content_length="Content-Length: 1\x0d\x0a"
+transfer_encoding="Transfer-Encoding: chunked\x0d\x0a"
+connection="Connection: close\x0d\x0a"

@@ -2,7 +2,7 @@
 
 PulseGate 是一个用 C++20 和 Boost.Asio 逐步实现的 HTTP 网关学习项目。
 
-当前开发进度是教程第 19 章“优雅停机”。当前开发版本为 `0.9.2`；最近发布
+当前开发进度是教程第 21 章“Sanitizer、静态分析与调试”。当前开发版本为 `0.9.3`；最近发布
 标签为 `v0.8.2`。主程序使用一个 `io_context` 和可配置数量的工作线程；每条
 Session 仍有自己的 strand，因此并发不会让单条连接的状态并行修改。
 
@@ -36,8 +36,9 @@ Session 仍有自己的 strand，因此并发不会让单条连接的状态并�
 - 集中管理、固定版本的 yaml-cpp 配置依赖；YAML 配置解析、聚合校验与不可变 reload 快照；
 - 有界异步 JSON/text access log、日志丢弃计数，以及低基数 Prometheus `/metrics`；
 - GoogleTest + CTest；
+- HTTP Parser 的 Clang libFuzzer 目标、语料目录和最小化崩溃回归流程；
 - Debug、Release、ASan/UBSan、TSan 独立预设；
-- clang-format、clang-tidy 与 GitHub 协作模板。
+- clang-format、clang-tidy、Boost.Asio handler tracking 与 GitHub 协作模板。
 
 ## 环境要求
 
@@ -267,6 +268,41 @@ ctest --preset tsan
 
 不要把 ASan/UBSan 与 TSan 放进同一个二进制；项目配置会主动拒绝这种组合。
 
+## Fuzz 与静态分析
+
+HTTP Parser 使用单独的 Clang/libFuzzer 构建，fuzzer 自带 ASan/UBSan。Ubuntu 上首次使用时需要安装
+`clang-21` 和 `libclang-rt-21-dev`；后者提供 libFuzzer 运行时。
+
+```bash
+cmake --preset fuzz
+cmake --build --preset fuzz
+corpus_dir=$(mktemp -d)
+cp -a tests/testdata/http/. "$corpus_dir"
+./build/fuzz/tests/fuzz/pulsegate_http_parser_fuzz \
+  "$corpus_dir" -dict=tests/fuzz/http_parser.dict \
+  -artifact_prefix="$corpus_dir/" -runs=10000 -max_len=65536
+rm -rf "$corpus_dir"
+```
+
+发现 crash 后，先让 libFuzzer 最小化输入，再将结果加入 `tests/testdata/http/` 和对应的确定性单元测试。
+完整流程见 [tests/fuzz/README.md](tests/fuzz/README.md)。
+
+clang-tidy 使用与普通 Debug 隔离的 Clang compilation database，先作为非阻断基线报告运行：
+
+```bash
+cmake --preset clang-tidy
+cmake --build --preset clang-tidy
+clang-tidy -p build/clang-tidy src/http/http_parser.cpp --quiet
+```
+
+排查异步 handler 调度时使用 `asio-tracking` 预设；它会产生大量诊断，只限 Debug：
+
+```bash
+cmake --preset asio-tracking
+cmake --build --preset asio-tracking
+./build/asio-tracking/app/pulsegate --listen 127.0.0.1:8080
+```
+
 ## 开发检查
 
 格式化本阶段源码：
@@ -282,7 +318,7 @@ clang-format -i \
 通过构建生成的编译数据库运行静态检查：
 
 ```bash
-clang-tidy -p build/debug \
+clang-tidy -p build/clang-tidy \
   app/pulsegate_main.cpp app/pulsegate_sync_main.cpp \
   src/core/version.cpp src/http/*.cpp src/net/*.cpp \
   tests/unit/smoke_test.cpp tests/integration/*.cpp

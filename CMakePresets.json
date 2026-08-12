@@ -44,6 +44,37 @@
       "cacheVariables": {
         "PULSEGATE_ENABLE_TSAN": "ON"
       }
+    },
+    {
+      "name": "clang-tidy",
+      "displayName": "Clang static analysis",
+      "inherits": "debug",
+      "binaryDir": "${sourceDir}/build/clang-tidy",
+      "cacheVariables": {
+        "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/cmake/clang-toolchain.cmake"
+      }
+    },
+    {
+      "name": "fuzz",
+      "displayName": "Clang libFuzzer",
+      "binaryDir": "${sourceDir}/build/fuzz",
+      "cacheVariables": {
+        "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/cmake/clang-toolchain.cmake",
+        "CMAKE_BUILD_TYPE": "Debug",
+        "PULSEGATE_BUILD_TESTS": "OFF",
+        "PULSEGATE_BUILD_FUZZERS": "ON",
+        "PULSEGATE_ENABLE_ASAN": "ON",
+        "PULSEGATE_ENABLE_UBSAN": "ON"
+      }
+    },
+    {
+      "name": "asio-tracking",
+      "displayName": "Debug with Boost.Asio handler tracking",
+      "inherits": "debug",
+      "binaryDir": "${sourceDir}/build/asio-tracking",
+      "cacheVariables": {
+        "PULSEGATE_ENABLE_ASIO_HANDLER_TRACKING": "ON"
+      }
     }
   ],
   "buildPresets": [
@@ -62,6 +93,18 @@
     {
       "name": "tsan",
       "configurePreset": "tsan"
+    },
+    {
+      "name": "clang-tidy",
+      "configurePreset": "clang-tidy"
+    },
+    {
+      "name": "fuzz",
+      "configurePreset": "fuzz"
+    },
+    {
+      "name": "asio-tracking",
+      "configurePreset": "asio-tracking"
     }
   ],
   "testPresets": [
