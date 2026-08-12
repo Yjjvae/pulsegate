@@ -8,6 +8,7 @@ target_sources(
     unit/config_test.cpp
     unit/http_parser_test.cpp
     unit/http_response_parser_test.cpp
+    unit/observability_test.cpp
     unit/rate_limiter_test.cpp
     unit/response_cache_test.cpp
     unit/router_test.cpp

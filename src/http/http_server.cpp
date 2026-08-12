@@ -65,6 +65,31 @@ bool isPositive(std::chrono::milliseconds value) {
     return value > std::chrono::milliseconds::zero();
 }
 
+std::string methodName(HttpMethod method) {
+    switch (method) {
+        case HttpMethod::Get:
+            return "GET";
+        case HttpMethod::Head:
+            return "HEAD";
+        case HttpMethod::Post:
+            return "POST";
+        case HttpMethod::Put:
+            return "PUT";
+        case HttpMethod::Delete:
+            return "DELETE";
+        case HttpMethod::Options:
+            return "OPTIONS";
+        case HttpMethod::Unknown:
+            return "UNKNOWN";
+    }
+    return "UNKNOWN";
+}
+
+std::string safeTarget(std::string_view target) {
+    const auto query = target.find('?');
+    return std::string(query == std::string_view::npos ? target : target.substr(0, query));
+}
+
 }  // namespace
 
 const char* toString(StopReason reason) noexcept {
@@ -172,7 +197,8 @@ void SessionRegistry::pruneExpiredLocked() {
 }
 
 HttpSession::HttpSession(net::tcp::socket socket, std::shared_ptr<Router> router,
-                         std::shared_ptr<SessionRegistry> registry, SessionId id,
+                         std::shared_ptr<SessionRegistry> registry,
+                         std::shared_ptr<Observability> observability, SessionId id,
                          SessionLimits limits)
     : socket_(std::move(socket)),
       router_(std::move(router)),
@@ -180,9 +206,10 @@ HttpSession::HttpSession(net::tcp::socket socket, std::shared_ptr<Router> router
       input_(limits_.read_chunk_bytes, limits_.max_buffer_bytes),
       parser_(limits_.parser),
       registry_(std::move(registry)),
+      observability_(std::move(observability)),
       id_(id),
       deadline_(std::make_shared<net::Deadline>(socket_.get_executor())) {
-    if (!router_ || !registry_) {
+    if (!router_ || !registry_ || !observability_) {
         throw std::invalid_argument("HTTP session requires a router and session registry");
     }
     if (limits_.read_chunk_bytes == 0 || limits_.max_buffer_bytes < limits_.read_chunk_bytes ||
@@ -228,6 +255,9 @@ net::Awaitable<void> HttpSession::run() {
     // A member coroutine stores only `this`; keep the Session alive across its
     // suspension points rather than relying on the weak registry or timer.
     [[maybe_unused]] const auto self = shared_from_this();
+    observability_->metrics().coroutineStarted();
+    const auto mark_finished =
+        runtime::makeScopeExit([this] { observability_->metrics().coroutineFinished(); });
     if (state_ == SessionState::Created) {
         state_ = SessionState::Running;
     }
@@ -239,6 +269,11 @@ net::Awaitable<void> HttpSession::run() {
 
         const bool close_after_response = !request->keepAlive();
         const bool head_request = request->method == HttpMethod::Head;
+        const auto request_started = std::chrono::steady_clock::now();
+        const auto method = methodName(request->method);
+        const auto target = safeTarget(request->target);
+        const auto bytes_in = request->body.size();
+        response_bytes_ = 0;
         net::ErrorCode endpoint_error;
         const auto peer = socket_.remote_endpoint(endpoint_error);
         RequestContext context{
@@ -258,11 +293,27 @@ net::Awaitable<void> HttpSession::run() {
                     co_return co_await session->writeDownstream(std::move(bytes));
                 }
                 co_return false;
-            }};
+            },
+            .observability = observability_};
         auto response = co_await router_->handle(context, std::move(*request));
         current_proxy_.reset();
         if (!response.already_written) {
             co_await writeResponse(response, head_request);
+        }
+        const auto duration = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - request_started);
+        observability_->metrics().recordHttp(method, response.status_code, context.route_name,
+                                             duration);
+        if (!observability_->logger().logAccess({.request_id = context.request_id,
+                                                 .method = method,
+                                                 .target = target,
+                                                 .status = response.status_code,
+                                                 .duration = duration,
+                                                 .bytes_in = bytes_in,
+                                                 .bytes_out = response_bytes_,
+                                                 .upstream = {},
+                                                 .cache_status = context.cache_status})) {
+            observability_->metrics().recordLogDrop();
         }
         served_request_ = true;
         if (response.close_connection || close_after_response || state_ == SessionState::Draining ||
@@ -319,6 +370,10 @@ net::Awaitable<std::optional<HttpRequest>> HttpSession::readRequest() {
 
 net::Awaitable<void> HttpSession::writeResponse(const HttpResponse& response, bool head_request) {
     auto bytes = response.serialize(head_request);
+    response_bytes_ += bytes.size();
+    observability_->metrics().addOutputBufferBytes(bytes.size());
+    const auto remove_buffered = runtime::makeScopeExit(
+        [this, size = bytes.size()] { observability_->metrics().removeOutputBufferBytes(size); });
     net::ErrorCode error;
     co_await net::asio::async_write(socket_, net::asio::buffer(bytes),
                                     net::asio::redirect_error(net::use_awaitable, error));
@@ -328,6 +383,10 @@ net::Awaitable<void> HttpSession::writeResponse(const HttpResponse& response, bo
 }
 
 net::Awaitable<bool> HttpSession::writeDownstream(std::string bytes) {
+    response_bytes_ += bytes.size();
+    observability_->metrics().addOutputBufferBytes(bytes.size());
+    const auto remove_buffered = runtime::makeScopeExit(
+        [this, size = bytes.size()] { observability_->metrics().removeOutputBufferBytes(size); });
     net::ErrorCode error;
     co_await net::asio::async_write(socket_, net::asio::buffer(bytes),
                                     net::asio::redirect_error(net::use_awaitable, error));
@@ -403,6 +462,7 @@ void HttpSession::closeInExecutor(StopReason reason) {
     if (!close_recorded_) {
         close_recorded_ = true;
         registry_->remove(id_, stop_reason_);
+        observability_->metrics().connectionClosed();
     }
 }
 
@@ -426,12 +486,15 @@ HttpServer::HttpServer(net::asio::io_context& context, net::ListenConfig config,
           limits) {}
 
 HttpServer::HttpServer(net::asio::io_context& context, net::ListenConfig config,
-                       RouterConfig router_config, SessionLimits limits)
-    : registry_(std::make_shared<SessionRegistry>(limits.max_connections)) {
+                       RouterConfig router_config, SessionLimits limits,
+                       std::shared_ptr<Observability> observability)
+    : registry_(std::make_shared<SessionRegistry>(limits.max_connections)),
+      observability_(observability ? std::move(observability) : std::make_shared<Observability>()) {
     auto router = std::move(router_config.router);
     if (!router) {
         throw std::invalid_argument("HTTP server requires a router");
     }
+    router->setObservability(observability_);
     net::ErrorCode error;
     const auto endpoint = net::makeEndpoint(config, error);
     if (error) {
@@ -441,17 +504,19 @@ HttpServer::HttpServer(net::asio::io_context& context, net::ListenConfig config,
     auto next_session_id = std::make_shared<std::atomic<SessionId>>(1);
     listener_ = std::make_shared<net::Listener>(
         context, endpoint, config.backlog,
-        [router = std::move(router), limits, registry = registry_,
+        [router = std::move(router), limits, registry = registry_, observability = observability_,
          next_session_id](net::tcp::socket socket) {
             const auto id = next_session_id->fetch_add(1, std::memory_order_relaxed);
-            auto session =
-                std::make_shared<HttpSession>(std::move(socket), router, registry, id, limits);
+            auto session = std::make_shared<HttpSession>(std::move(socket), router, registry,
+                                                         observability, id, limits);
             if (registry->tryAdd(id, session)) {
+                observability->metrics().connectionAccepted();
                 session->start();
             } else {
                 net::ErrorCode ignored;
                 socket.close(ignored);
                 registry->recordRejected(StopReason::ResourceLimit);
+                observability->metrics().connectionRejected("resource_limit");
             }
         },
         [](std::string_view operation, std::exception_ptr exception) {
@@ -478,6 +543,10 @@ std::size_t HttpServer::connectionCount() const {
 
 std::size_t HttpServer::closedCount(StopReason reason) const {
     return registry_->closedCount(reason);
+}
+
+std::shared_ptr<Observability> HttpServer::observability() const noexcept {
+    return observability_;
 }
 
 std::shared_ptr<Router> HttpServer::makeDefaultRouter(
@@ -510,6 +579,9 @@ std::shared_ptr<Router> HttpServer::makeDefaultRouter(
         HttpResponse response;
         response.body = "pulsegate_ready 1\n";
         if (const auto locked_router = weak_router.lock()) {
+            if (const auto observability = locked_router->observability()) {
+                response.body.append(observability->renderPrometheus());
+            }
             response.body.append(locked_router->rateLimitMetrics());
             response.body.append(locked_router->cacheMetrics());
         }

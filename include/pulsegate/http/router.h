@@ -13,6 +13,7 @@
 
 #include "pulsegate/http/http_request.h"
 #include "pulsegate/http/http_response.h"
+#include "pulsegate/http/observability.h"
 #include "pulsegate/http/rate_limiter.h"
 #include "pulsegate/http/response_cache.h"
 #include "pulsegate/net/asio_types.h"
@@ -34,6 +35,9 @@ struct RequestContext {
     // Cache-enabled proxy routes use their complete-response path on a miss so
     // the Router can decide whether the response is eligible for storage.
     bool buffer_response_for_cache{false};
+    std::string route_name{"unmatched"};
+    std::string cache_status{"BYPASS"};
+    std::shared_ptr<Observability> observability{};
 };
 
 using HttpHandler = std::function<net::Awaitable<HttpResponse>(RequestContext&, HttpRequest)>;
@@ -58,6 +62,8 @@ class Router {
     [[nodiscard]] std::string nextRequestId();
     [[nodiscard]] std::string rateLimitMetrics() const;
     [[nodiscard]] std::string cacheMetrics() const;
+    void setObservability(std::shared_ptr<Observability> observability);
+    [[nodiscard]] std::shared_ptr<Observability> observability() const;
 
    private:
     using Routes = std::vector<Route>;
@@ -75,8 +81,9 @@ class Router {
     std::atomic<std::shared_ptr<const Routes>> routes_;
     std::atomic<std::shared_ptr<const RouteLimiters>> route_limiters_;
     std::atomic<std::shared_ptr<const RouteCaches>> route_caches_;
-    std::mutex update_mutex_;
+    mutable std::mutex update_mutex_;
     std::shared_ptr<RateLimiter> global_limiter_;
+    std::shared_ptr<Observability> observability_;
     std::atomic_uint64_t next_request_id_{1};
 };
 

@@ -627,13 +627,16 @@ TEST(AsyncHttpServerTest, ServesDefaultAsyncRoutesAndSplitEchoBody) {
 
     const auto version = exchange(
         server, {"GET /api/version HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"});
-    EXPECT_NE(version.find("0.9.0\n"), std::string::npos);
+    EXPECT_NE(version.find("0.9.1\n"), std::string::npos);
 
     const auto metrics =
         exchange(server, {"GET /metrics HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"});
     EXPECT_NE(metrics.find("\r\n\r\npulsegate_ready 1\n"), std::string::npos);
     EXPECT_NE(metrics.find("# TYPE pulsegate_rate_limit_requests_total counter\n"),
               std::string::npos);
+    EXPECT_NE(metrics.find("# TYPE pulsegate_http_requests_total counter\n"), std::string::npos);
+    EXPECT_NE(metrics.find("pulsegate_accepted_connections_total "), std::string::npos);
+    EXPECT_NE(metrics.find("pulsegate_logs_dropped_total 0\n"), std::string::npos);
     EXPECT_NE(metrics.find("content-type: text/plain; version=0.0.4\r\n"), std::string::npos);
 
     const auto echo =

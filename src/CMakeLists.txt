@@ -85,6 +85,7 @@ target_sources(
     http/file_service.cpp
     http/health_checker.cpp
     http/http_parser.cpp
+    http/observability.cpp
     http/http_request.cpp
     http/http_response.cpp
     http/http_response_parser.cpp
