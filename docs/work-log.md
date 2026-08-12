@@ -711,9 +711,38 @@
 
 遗留事项：
 
-- 第十九章会把 ready/draining 状态接到优雅停机状态机；当前 `/readyz` 仍表示已可接受流量；
 - 活跃协程当前统计 HTTP Session 顶层协程；更细粒度的 resolver、proxy 和 timer coroutine 统计可在
   profile 驱动后再补充。
+
+## 2026-08-12
+
+### 第十九章：优雅停机
+
+完成内容：
+
+- `HttpServer::beginDrain(grace, callback)` 成为幂等的关闭入口：先停止 Listener、将 Registry 标为
+  draining，再等待现有 Session；新连接不再被接受，正在读取下一条请求的 Keep-Alive 连接立即关闭；
+- 默认 Router 的 `/readyz` 读取 Server drain 状态，进入 draining 后返回 `503 Service Unavailable`；
+- 使用 `steady_timer` 实现 grace deadline。到期后通过 Registry 取消所有残留 Session，并等待 Registry
+  实际清空后才调用完成回调；Session 关闭会取消当前 `ProxySession`，进一步释放 Resolver、连接池 waiter
+  和上游 socket；
+- CLI 的 SIGINT/SIGTERM 使用 15 秒 grace，YAML 启动路径使用 `server.graceful_shutdown_ms`。SIGHUP 仍会
+  重挂 `signal_set` 等待配置重载；正常停止只在 drain 清理完成后释放 Runtime work guard；
+- 开发版本升级至 `0.9.2`，README 增加优雅停机语义和本机 SIGTERM 验收命令。
+
+验证结果：
+
+- 集成测试覆盖：无活跃 Session 时停止 accept、半包读取连接关闭、慢代理在 deadline 内成功完成，以及慢代理
+  超过 deadline 后被强制取消；
+- Debug、ASan/UBSan、TSan 完整 CTest 均为 **123/123 通过**；Release 构建的 `--version` 输出 `0.9.2`；
+  独立 `-Werror` 构建、`clang-format --dry-run --Werror`、`git diff --check` 均通过；
+- 进程级验收启动 `127.0.0.1:18080`，确认 `/readyz` 初始返回 `ready`，再发送 `SIGTERM`，进程以 **0** 退出。
+
+重要决策：
+
+- deadline 到期不立即释放 work guard。先把取消投递给各 Session executor，再等 Registry 为空，防止
+  `io_context` 过早返回而遗漏取消处理、连接清理或 access log；
+- `io_context.stop()` 不作为正常优雅关闭路径。它仍只保留给无法自然收敛时的外部强制兜底。
 
 ## 后续记录模板
 

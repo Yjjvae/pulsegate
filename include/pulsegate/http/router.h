@@ -64,6 +64,8 @@ class Router {
     [[nodiscard]] std::string cacheMetrics() const;
     void setObservability(std::shared_ptr<Observability> observability);
     [[nodiscard]] std::shared_ptr<Observability> observability() const;
+    void setReadyCallback(std::function<bool()> callback);
+    [[nodiscard]] bool ready() const;
 
    private:
     using Routes = std::vector<Route>;
@@ -84,6 +86,7 @@ class Router {
     mutable std::mutex update_mutex_;
     std::shared_ptr<RateLimiter> global_limiter_;
     std::shared_ptr<Observability> observability_;
+    std::function<bool()> ready_callback_;
     std::atomic_uint64_t next_request_id_{1};
 };
 

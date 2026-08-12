@@ -489,12 +489,14 @@ HttpServer::HttpServer(net::asio::io_context& context, net::ListenConfig config,
                        RouterConfig router_config, SessionLimits limits,
                        std::shared_ptr<Observability> observability)
     : registry_(std::make_shared<SessionRegistry>(limits.max_connections)),
-      observability_(observability ? std::move(observability) : std::make_shared<Observability>()) {
+      observability_(observability ? std::move(observability) : std::make_shared<Observability>()),
+      drain_timer_(context) {
     auto router = std::move(router_config.router);
     if (!router) {
         throw std::invalid_argument("HTTP server requires a router");
     }
     router->setObservability(observability_);
+    router->setReadyCallback([this] { return !isDraining(); });
     net::ErrorCode error;
     const auto endpoint = net::makeEndpoint(config, error);
     if (error) {
@@ -531,6 +533,54 @@ void HttpServer::start() {
 void HttpServer::stop() {
     listener_->stop();
     registry_->beginDrain();
+    registry_->forceCloseAll();
+}
+
+void HttpServer::beginDrain(std::chrono::milliseconds grace,
+                            std::function<void(bool drained)> on_complete) {
+    if (grace <= std::chrono::milliseconds::zero()) {
+        throw std::invalid_argument("drain grace period must be positive");
+    }
+    bool expected = false;
+    if (!draining_.compare_exchange_strong(expected, true)) return;
+    drain_finished_.store(false, std::memory_order_release);
+    drain_deadline_expired_.store(false, std::memory_order_release);
+    on_drain_complete_ = std::move(on_complete);
+    listener_->stop();
+    registry_->beginDrain();
+    drain_timer_.expires_after(grace);
+    drain_timer_.async_wait([this](const net::ErrorCode& error) {
+        if (!error) {
+            drain_deadline_expired_.store(true, std::memory_order_release);
+            registry_->forceCloseAll();
+            checkDrain();
+        }
+    });
+    checkDrain();
+}
+
+bool HttpServer::isDraining() const noexcept {
+    return draining_.load(std::memory_order_acquire);
+}
+
+void HttpServer::checkDrain() {
+    if (drain_finished_.load(std::memory_order_acquire)) return;
+    if (registry_->size() == 0) {
+        finishDrain(!drain_deadline_expired_.load(std::memory_order_acquire));
+        return;
+    }
+    auto poll = std::make_shared<net::asio::steady_timer>(drain_timer_.get_executor());
+    poll->expires_after(std::chrono::milliseconds(10));
+    poll->async_wait([this, poll](const net::ErrorCode& error) {
+        if (!error) checkDrain();
+    });
+}
+
+void HttpServer::finishDrain(bool drained) {
+    bool expected = false;
+    if (!drain_finished_.compare_exchange_strong(expected, true)) return;
+    drain_timer_.cancel();
+    if (on_drain_complete_) on_drain_complete_(drained);
 }
 
 net::tcp::endpoint HttpServer::localEndpoint() const {
@@ -572,7 +622,22 @@ std::shared_ptr<Router> HttpServer::makeDefaultRouter(
     };
     add_get_and_head("/healthz", "healthz", text("ok\n"));
     add_get_and_head("/livez", "livez", text("alive\n"));
-    add_get_and_head("/readyz", "readyz", text("ready\n"));
+    const std::weak_ptr<Router> readiness_router = router;
+    const auto ready = [readiness_router](RequestContext&,
+                                          HttpRequest) -> net::Awaitable<HttpResponse> {
+        HttpResponse response;
+        const auto locked = readiness_router.lock();
+        if (!locked || !locked->ready()) {
+            response.status_code = 503;
+            response.reason = "Service Unavailable";
+            response.body = "draining\n";
+        } else {
+            response.body = "ready\n";
+        }
+        response.headers.add("Content-Type", "text/plain");
+        co_return response;
+    };
+    add_get_and_head("/readyz", "readyz", ready);
     const std::weak_ptr<Router> weak_router = router;
     const auto metrics = [weak_router](RequestContext&,
                                        HttpRequest) -> net::Awaitable<HttpResponse> {

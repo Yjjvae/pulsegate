@@ -2,7 +2,7 @@
 
 PulseGate 是一个用 C++20 和 Boost.Asio 逐步实现的 HTTP 网关学习项目。
 
-当前开发进度是教程第 18 章“日志与可观测性”。当前开发版本为 `0.9.1`；最近发布
+当前开发进度是教程第 19 章“优雅停机”。当前开发版本为 `0.9.2`；最近发布
 标签为 `v0.8.2`。主程序使用一个 `io_context` 和可配置数量的工作线程；每条
 Session 仍有自己的 strand，因此并发不会让单条连接的状态并行修改。
 
@@ -21,7 +21,7 @@ Session 仍有自己的 strand，因此并发不会让单条连接的状态并�
 - 安全 Header 处理、响应序列化，以及 400、405、413、431、501 错误映射；
 - 单线程 C++20 Coroutine Listener/Session，慢客户端不会阻塞其他连接；
 - generation-safe `steady_timer` Deadline，以及 Header、Body 和 Keep-Alive 空闲超时；
-- 带唯一 `StopReason` 的 Session 状态机、连接注册表、连接上限和优雅 drain；
+- 带唯一 `StopReason` 的 Session 状态机、连接注册表、连接上限，以及带 deadline 的优雅 drain；
 - `AsioRuntime` 管理一个 `io_context`、work guard 与可配置的 `std::jthread` worker；
 - Session strand 串行化单连接状态；不同连接可由不同 worker 并行推进；
 - coroutine Router：精确/前缀匹配、405 Allow、请求 ID、异常到 500 的统一边界；
@@ -194,6 +194,29 @@ cmake --build --preset debug
 不可变快照；解析/校验失败时保留旧快照。监听地址、I/O 线程、Session 限制、上游和路由会明确提示
 “需要重启”，不会产生只更新部分运行对象的危险热更新。当前唯一可安全发布的热更新字段是 logging 元数据；
 第 18 章已将它接入异步 access logger。
+
+## 优雅停机
+
+收到 `SIGINT` 或 `SIGTERM` 后，PulseGate 进入 draining：先停止监听新连接，`/readyz` 改为
+`503 Service Unavailable`，既有 Keep-Alive 连接不会接收下一条请求；正在执行的 HTTP/代理事务则可在
+grace period 内完成。配置模式使用 `server.graceful_shutdown_ms`，CLI 模式使用 15 秒。
+
+超过 grace period 仍未完成时，Server 会取消剩余 Session；这会级联取消其代理 Resolver、池 waiter 和
+上游 socket。注册表清空后才释放 `AsioRuntime` 的 work guard，让 `io_context` 自然退出，而不是提前调用
+`io_context.stop()`。
+
+可以用下面方式做一次本机验收（端口可按需替换）：
+
+```bash
+./build/debug/app/pulsegate --listen 127.0.0.1:18080 --threads 2 &
+server_pid=$!
+curl --noproxy '*' http://127.0.0.1:18080/readyz
+kill -TERM "$server_pid"
+wait "$server_pid"
+echo "$?" # 预期 0
+```
+
+若要观察 deadline 的强制取消，可在配置中将 `graceful_shutdown_ms` 调小，并让上游响应延迟更久。
 
 ## 日志与可观测性
 

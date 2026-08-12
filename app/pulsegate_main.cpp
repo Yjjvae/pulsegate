@@ -217,16 +217,17 @@ int runFromConfig(const std::filesystem::path& path) {
                                        pulsegate::http::RouterConfig{std::move(router)},
                                        sessionLimitsFromConfig(loaded.server), observability);
     const auto endpoint = server.localEndpoint();
+    const auto graceful_shutdown = loaded.server.graceful_shutdown;
     std::cout << "PulseGate listening on " << endpoint.address().to_string() << ':'
               << endpoint.port() << " (config " << path.string() << ")\n";
 
     auto signals =
         std::make_shared<boost::asio::signal_set>(runtime.context(), SIGINT, SIGTERM, SIGHUP);
     auto wait_signal = std::make_shared<std::function<void()>>();
-    *wait_signal = [signals, wait_signal, manager, observability, &server, &runtime,
-                    &health_checkers, &reverse_proxies] {
-        signals->async_wait([signals, wait_signal, manager, observability, &server, &runtime,
-                             &health_checkers,
+    *wait_signal = [signals, wait_signal, manager, observability, graceful_shutdown, &server,
+                    &runtime, &health_checkers, &reverse_proxies] {
+        signals->async_wait([signals, wait_signal, manager, observability, graceful_shutdown,
+                             &server, &runtime, &health_checkers,
                              &reverse_proxies](const boost::system::error_code& error, int signal) {
             if (error) return;
             if (signal == SIGHUP) {
@@ -251,10 +252,12 @@ int runFromConfig(const std::filesystem::path& path) {
                 (*wait_signal)();
                 return;
             }
-            for (const auto& checker : health_checkers) checker->stop();
-            for (const auto& proxy : reverse_proxies) proxy.stop();
-            server.stop();
-            runtime.requestStop();
+            server.beginDrain(graceful_shutdown,
+                              [&runtime, &health_checkers, &reverse_proxies](bool) {
+                                  for (const auto& checker : health_checkers) checker->stop();
+                                  for (const auto& proxy : reverse_proxies) proxy.stop();
+                                  runtime.requestStop();
+                              });
         });
     };
     (*wait_signal)();
@@ -481,14 +484,12 @@ int main(int argc, char* argv[]) {
         boost::asio::signal_set signals(runtime.context(), SIGINT, SIGTERM);
         signals.async_wait([&server, &runtime, &health_checkers, &reverse_proxies](
                                const boost::system::error_code&, int) {
-            for (const auto& checker : health_checkers) {
-                checker->stop();
-            }
-            for (const auto& proxy : reverse_proxies) {
-                proxy.stop();
-            }
-            server.stop();
-            runtime.requestStop();
+            server.beginDrain(std::chrono::seconds(15),
+                              [&runtime, &health_checkers, &reverse_proxies](bool) {
+                                  for (const auto& checker : health_checkers) checker->stop();
+                                  for (const auto& proxy : reverse_proxies) proxy.stop();
+                                  runtime.requestStop();
+                              });
         });
         server.start();
         runtime.start();
