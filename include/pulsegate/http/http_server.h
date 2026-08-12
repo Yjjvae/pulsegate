@@ -1,5 +1,7 @@
 #pragma once
 
+#include <atomic>
+#include <boost/asio/steady_timer.hpp>
 #include <chrono>
 #include <functional>
 #include <memory>
@@ -86,6 +88,12 @@ class HttpServer {
 
     void start();
     void stop();
+    // Stop accepting new sockets, let active responses finish until grace,
+    // then force-close anything remaining. The callback receives true only
+    // when all sessions drained before the deadline.
+    void beginDrain(std::chrono::milliseconds grace,
+                    std::function<void(bool drained)> on_complete = {});
+    [[nodiscard]] bool isDraining() const noexcept;
     [[nodiscard]] net::tcp::endpoint localEndpoint() const;
     [[nodiscard]] std::size_t connectionCount() const;
     [[nodiscard]] std::size_t closedCount(StopReason reason) const;
@@ -94,9 +102,16 @@ class HttpServer {
         std::optional<RateLimitConfig> global_rate_limit = std::nullopt);
 
    private:
+    void checkDrain();
+    void finishDrain(bool drained);
     std::shared_ptr<net::Listener> listener_;
     std::shared_ptr<SessionRegistry> registry_;
     std::shared_ptr<Observability> observability_;
+    net::asio::steady_timer drain_timer_;
+    std::function<void(bool)> on_drain_complete_;
+    std::atomic_bool draining_{false};
+    std::atomic_bool drain_finished_{false};
+    std::atomic_bool drain_deadline_expired_{false};
 };
 
 }  // namespace pulsegate::http

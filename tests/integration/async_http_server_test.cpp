@@ -11,6 +11,7 @@
 #include <charconv>
 #include <chrono>
 #include <cstddef>
+#include <future>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -64,6 +65,15 @@ class RunningServer {
         if (thread_.joinable()) {
             thread_.join();
         }
+    }
+    template <typename Handler>
+    void beginDrain(std::chrono::milliseconds grace, Handler&& handler) {
+        asio::post(context_, [this, grace, handler = std::forward<Handler>(handler)]() mutable {
+            server_.beginDrain(grace, std::move(handler));
+        });
+    }
+    [[nodiscard]] bool isDraining() const {
+        return server_.isDraining();
     }
     [[nodiscard]] std::size_t connectionCount() const {
         return server_.connectionCount();
@@ -270,6 +280,12 @@ class ProxyRunningServer {
     }
     [[nodiscard]] tcp::endpoint endpoint() const {
         return server_.localEndpoint();
+    }
+    template <typename Handler>
+    void beginDrain(std::chrono::milliseconds grace, Handler&& handler) {
+        asio::post(context_, [this, grace, handler = std::forward<Handler>(handler)]() mutable {
+            server_.beginDrain(grace, std::move(handler));
+        });
     }
 
    private:
@@ -627,7 +643,7 @@ TEST(AsyncHttpServerTest, ServesDefaultAsyncRoutesAndSplitEchoBody) {
 
     const auto version = exchange(
         server, {"GET /api/version HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"});
-    EXPECT_NE(version.find("0.9.1\n"), std::string::npos);
+    EXPECT_NE(version.find("0.9.2\n"), std::string::npos);
 
     const auto metrics =
         exchange(server, {"GET /metrics HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"});
@@ -928,6 +944,91 @@ TEST(AsyncHttpServerTest, AcceptsExternalThreadStopOnMultiWorkerRuntime) {
     EXPECT_TRUE(
         waitUntil([&server] { return server.closedCount(StopReason::ServerShutdown) == 1U; }));
     EXPECT_EQ(server.connectionCount(), 0U);
+}
+
+TEST(AsyncHttpServerTest, DrainStopsAcceptingAndCompletesWhenNoSessionsRemain) {
+    RunningServer server;
+    const auto endpoint = server.endpoint();
+    std::promise<bool> completed;
+    server.beginDrain(std::chrono::milliseconds(100),
+                      [&completed](bool drained) { completed.set_value(drained); });
+
+    EXPECT_TRUE(completed.get_future().get());
+    EXPECT_TRUE(server.isDraining());
+    asio::io_context client_context;
+    tcp::socket client(client_context);
+    boost::system::error_code error;
+    client.connect(endpoint, error);
+    EXPECT_TRUE(error);
+}
+
+TEST(AsyncHttpServerTest, DrainClosesIncompleteSessionBeforeDeadline) {
+    RunningServer server;
+    asio::io_context client_context;
+    tcp::socket client(client_context);
+    client.connect(server.endpoint());
+    asio::write(client, asio::buffer("GET /healthz HTTP/1.1\r\nHo"));
+    ASSERT_TRUE(waitUntil([&server] { return server.connectionCount() == 1U; }));
+
+    std::promise<bool> completed;
+    server.beginDrain(std::chrono::milliseconds(20),
+                      [&completed](bool drained) { completed.set_value(drained); });
+    EXPECT_TRUE(completed.get_future().get());
+    EXPECT_TRUE(waitForClose(client));
+    EXPECT_TRUE(
+        waitUntil([&server] { return server.closedCount(StopReason::ServerShutdown) == 1U; }));
+}
+
+TEST(AsyncHttpServerTest, DrainLetsSlowProxyRequestFinishBeforeDeadline) {
+    MockUpstream upstream({"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nok\n"}, 1,
+                          std::chrono::milliseconds(30));
+    const auto endpoint = upstream.endpoint();
+    ProxyRunningServer gateway(
+        {{.host = endpoint.address().to_string(), .service = std::to_string(endpoint.port())}});
+
+    std::promise<std::string> response;
+    std::jthread request([&] {
+        try {
+            response.set_value(exchange(gateway, {"GET /proxy/slow HTTP/1.1\r\nHost: localhost\r\n"
+                                                  "Connection: close\r\n\r\n"}));
+        } catch (...) {
+            response.set_exception(std::current_exception());
+        }
+    });
+    ASSERT_TRUE(waitUntil([&upstream] { return upstream.requestStarted(); }));
+
+    std::promise<bool> completed;
+    gateway.beginDrain(std::chrono::milliseconds(250),
+                       [&completed](bool drained) { completed.set_value(drained); });
+    EXPECT_TRUE(completed.get_future().get());
+    EXPECT_NE(response.get_future().get().find("HTTP/1.1 200 OK\r\n"), std::string::npos);
+}
+
+TEST(AsyncHttpServerTest, DrainForceClosesSlowProxyRequestAfterDeadline) {
+    MockUpstream upstream({"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nok\n"}, 1,
+                          std::chrono::milliseconds(500));
+    const auto endpoint = upstream.endpoint();
+    ProxyRunningServer gateway(
+        {{.host = endpoint.address().to_string(), .service = std::to_string(endpoint.port())}});
+
+    std::promise<void> request_finished;
+    std::jthread request([&] {
+        try {
+            static_cast<void>(exchange(gateway, {"GET /proxy/slow HTTP/1.1\r\nHost: localhost\r\n"
+                                                 "Connection: close\r\n\r\n"}));
+        } catch (...) {
+        }
+        request_finished.set_value();
+    });
+    ASSERT_TRUE(waitUntil([&upstream] { return upstream.requestStarted(); }));
+
+    std::promise<bool> completed;
+    gateway.beginDrain(std::chrono::milliseconds(30),
+                       [&completed](bool drained) { completed.set_value(drained); });
+    EXPECT_FALSE(completed.get_future().get());
+    EXPECT_EQ(request_finished.get_future().wait_for(std::chrono::milliseconds(200)),
+              std::future_status::ready);
+    EXPECT_TRUE(waitUntil([&upstream] { return upstream.received(); }));
 }
 
 TEST(AsyncHttpServerTest, DrainsRegistryAfterManyMultiWorkerConnections) {

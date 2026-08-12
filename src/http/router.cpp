@@ -71,6 +71,16 @@ std::shared_ptr<Observability> Router::observability() const {
     return observability_;
 }
 
+void Router::setReadyCallback(std::function<bool()> callback) {
+    std::scoped_lock lock(update_mutex_);
+    ready_callback_ = std::move(callback);
+}
+
+bool Router::ready() const {
+    std::scoped_lock lock(update_mutex_);
+    return !ready_callback_ || ready_callback_();
+}
+
 std::optional<Route> Router::match(HttpMethod method, std::string_view target) const {
     const auto path = pathPart(target);
     const auto snapshot = routes_.load(std::memory_order_acquire);
