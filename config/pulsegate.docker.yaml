@@ -1,0 +1,33 @@
+# This configuration is intentionally checked in for `docker compose up`.
+# It is mounted read-only by compose.yaml; copy it before making local changes.
+server:
+  listen_host: 0.0.0.0
+  listen_port: 8080
+  io_threads: 2
+  idle_timeout_ms: 30000
+  header_timeout_ms: 5000
+  body_timeout_ms: 30000
+  graceful_shutdown_ms: 15000
+  max_connections: 20000
+  max_header_bytes: 16384
+  max_body_bytes: 1048576
+  output_high_water_bytes: 4194304
+  output_low_water_bytes: 2097152
+
+routes:
+  - path_prefix: /api/
+    upstream: demo
+
+upstreams:
+  - name: demo
+    endpoints:
+      - upstream-a:9000
+      - upstream-b:9000
+    connect_timeout_ms: 300
+    response_timeout_ms: 2000
+    max_connections_per_endpoint: 64
+    pool_shards: 1
+
+logging:
+  level: info
+  format: json

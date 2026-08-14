@@ -805,6 +805,45 @@
 - 默认 worker 数不因单个 `/healthz` 实验改动。真实 proxy、cache、日志和容器负载应以独立 profile 和
   before/after 矩阵决定；本章优先建立可信的证据链，而不是无依据的微优化。
 
+## 2026-08-14
+
+### 第二十三章：Docker 容器化
+
+完成内容：
+
+- 新增多阶段 `Dockerfile`：build stage 固定 Ubuntu 24.04、安装 CMake/Boost/编译工具并使用 Release
+  preset 构建；runtime stage 只复制 `pulsegate` 二进制和配置，以 UID/GID `10001` 的无 shell 非 root
+  用户运行，使用 exec-form entrypoint 和 `SIGTERM` stop signal；
+- 新增 `.dockerignore`，排除 Git 元数据、构建结果、测试、文档、日志、本地配置和 benchmark 原始结果，
+  缩小构建上下文且不把机密或机器相关文件带入镜像；
+- 新增可直接运行的 `compose.yaml` 和 Docker DNS 配置文件。两个上游都由同一 Dockerfile 的
+  `mock-upstream` target 构建，因此没有未替换的测试镜像或命令占位符；gateway 以只读配置挂载、只读
+  根文件系统、`tmpfs`、`no-new-privileges`、init 和 20 秒优雅停机窗口运行；
+- build stage 支持由调用方传入标准 `HTTP_PROXY`、`HTTPS_PROXY` 与 `NO_PROXY` 参数，以便企业/校园网络
+  下载 Ubuntu 依赖和固定 yaml-cpp 提交；具体代理地址不进入 Dockerfile 或最终镜像；
+- mock upstream 正确忽略 TCP-only health check 在未发送 HTTP 请求时的连接重置，避免把正常探测显示为
+  Python traceback；
+- README 记录构建、启动、轮询、日志、优雅停止、清理、非 root/只读运行和基础镜像 digest 固定策略。
+
+验证结果：
+
+- Release 二进制 `ldd` 仅显示 glibc、libstdc++、libm 和 libgcc；yaml-cpp 与 Boost 使用当前静态/头文件
+  链接策略，runtime stage 无需复制额外的项目依赖动态库；
+- Docker Engine 29.1.3 / Compose 2.40.3 实测完成多阶段构建；Ubuntu 24.04 基础镜像解析为
+  `sha256:561618…f5c538ea`，最终 gateway 镜像为 **134 MB**；
+- `docker compose up` 后 `/livez` 返回 `alive`，两个连续 `/api/*` 请求分别到达 `upstream-a` 和
+  `upstream-b`；停掉 `upstream-a` 并等待健康检查摘除后，`curl --fail /api/after-stop` 仍成功，恢复后再次
+  请求成功；
+- runtime 容器实际为 UID/GID `10001:10001`、`ReadonlyRootfs=true`、`STOPSIGNAL=SIGTERM`；在只读
+  文件系统中检查确认没有 gcc、CMake 或 `/src` 源码目录；`docker compose stop gateway` 的 exit code 为 0。
+
+重要决策：
+
+- mock upstream 作为 Dockerfile 明确 target 而非浮动的第三方演示镜像，确保 Compose 演示行为和本地学习
+  工具一致；
+- Ubuntu `24.04` 是固定发行版而非 `latest`，但不是不可变 digest；发布流水线应按扫描/SBOM 的更新节奏把
+  它收紧为具体 digest。
+
 ## 后续记录模板
 
 ```markdown

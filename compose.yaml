@@ -1,0 +1,65 @@
+name: pulsegate-demo
+
+services:
+  gateway:
+    build:
+      context: .
+      target: runtime
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./config/pulsegate.docker.yaml:/etc/pulsegate/config.yaml:ro
+    depends_on:
+      upstream-a:
+        condition: service_healthy
+      upstream-b:
+        condition: service_healthy
+    init: true
+    stop_grace_period: 20s
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+
+  upstream-a:
+    build:
+      context: .
+      target: mock-upstream
+    command: ["--host", "0.0.0.0", "--port", "9000", "--name", "upstream-a", "--keep-alive"]
+    healthcheck:
+      test:
+        - CMD
+        - python3
+        - -c
+        - "import socket; connection = socket.create_connection(('127.0.0.1', 9000), 1); connection.close()"
+      interval: 2s
+      timeout: 1s
+      retries: 10
+      start_period: 1s
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+
+  upstream-b:
+    build:
+      context: .
+      target: mock-upstream
+    command: ["--host", "0.0.0.0", "--port", "9000", "--name", "upstream-b", "--keep-alive"]
+    healthcheck:
+      test:
+        - CMD
+        - python3
+        - -c
+        - "import socket; connection = socket.create_connection(('127.0.0.1', 9000), 1); connection.close()"
+      interval: 2s
+      timeout: 1s
+      retries: 10
+      start_period: 1s
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
