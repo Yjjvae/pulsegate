@@ -1,0 +1,13 @@
+.git
+.github
+.agents
+.codex
+build
+cmake-build-*
+.cache
+benchmarks/results
+docs
+tests
+*.log
+.env
+config/pulsegate.local.yaml

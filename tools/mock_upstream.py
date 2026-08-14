@@ -101,7 +101,11 @@ async def main() -> None:
             pass
         finally:
             writer.close()
-            await writer.wait_closed()
+            try:
+                await writer.wait_closed()
+            except ConnectionError:
+                # TCP-only health checks may close before sending an HTTP request.
+                pass
 
     server = await asyncio.start_server(handle, args.host, args.port)
     print(f"{args.name} listening on {args.host}:{args.port}", flush=True)

@@ -2,7 +2,7 @@
 
 PulseGate 是一个用 C++20 和 Boost.Asio 逐步实现的 HTTP 网关学习项目。
 
-当前开发进度是教程第 21 章“Sanitizer、静态分析与调试”。当前开发版本为 `0.9.3`；最近发布
+当前开发进度是教程第 23 章“Docker 容器化”。当前开发版本为 `0.9.3`；最近发布
 标签为 `v0.8.2`。主程序使用一个 `io_context` 和可配置数量的工作线程；每条
 Session 仍有自己的 strand，因此并发不会让单条连接的状态并行修改。
 
@@ -318,6 +318,55 @@ tools/benchmark.sh --workers 1,2,4,8 --trials 3 \
 完整方法、实测数据与局限见
 [v0.9.3 `/healthz` 多 Worker 基线](docs/benchmarks/v0.9.3-healthz-baseline.md)。不要将单机回环 RPS
 外推为生产性能，也不要在没有 profile 证据时改动热路径。
+
+## Docker 演示环境
+
+第 23 章提供可复现的多阶段容器构建。最终 `runtime` 镜像只包含 PulseGate、CA 证书和一个
+UID/GID 为 `10001` 的无 shell 运行用户；编译器、CMake、Git、Boost 头文件与源码都留在 build
+stage。`compose.yaml` 使用同一份 Dockerfile 构建两个确定性的 Python mock upstream，并让网关通过
+Docker DNS 轮询它们。
+
+需要 Docker Engine 与 Compose v2。首次运行会下载 Ubuntu 24.04 基础镜像并在 build stage 获取固定的
+yaml-cpp 源码：
+
+```bash
+docker compose config
+docker compose up --build -d
+docker compose ps
+curl --noproxy '*' --include http://127.0.0.1:8080/livez
+curl --noproxy '*' --include http://127.0.0.1:8080/api/demo
+docker compose logs gateway
+```
+
+重复请求 `/api/demo`，响应会在 `upstream-a` 与 `upstream-b` 间轮转。Compose 以只读根文件系统运行
+所有服务，把网关 YAML 通过 `:ro` 挂载，并给 gateway 配置 `init: true`、`STOPSIGNAL SIGTERM` 和
+20 秒 stop grace period；`docker compose stop gateway` 可用于验证优雅停机。验收结束后清理：
+
+```bash
+docker compose down --volumes
+```
+
+若 Docker build 所在网络必须经 HTTP(S) 代理访问 Ubuntu 软件源或 GitHub，`Dockerfile` 只在 build
+stage 接收标准代理参数；不要把具体代理地址写入仓库：
+
+```bash
+docker compose build \
+  --build-arg HTTP_PROXY \
+  --build-arg HTTPS_PROXY \
+  --build-arg NO_PROXY
+```
+
+这些值仅用于构建时下载依赖，最终 runtime 镜像不包含它们。
+
+运行时镜像也可以单独检查：
+
+```bash
+docker build --target runtime -t pulsegate:0.9.3 .
+docker run --rm --read-only --tmpfs /tmp --user 10001:10001 pulsegate:0.9.3 --version
+```
+
+基础镜像使用 Ubuntu 的固定发行版标签 `24.04`，生产发布应进一步锁定到 digest，并配合镜像扫描或 SBOM
+工具持续更新。不要使用未带版本的 `latest` 作为发布镜像唯一标签。
 
 ## 开发检查
 
