@@ -21,6 +21,7 @@
 - TSan：123/123 CTest 通过；
 - Parser fuzz：在临时语料上完成 10,000 次 libFuzzer smoke，未报告 ASan/UBSan 错误；
 - clang-format 和 `git diff --check` 通过。
+- 已完成 `1/2/4/8` worker、每组 3 次、`wrk -t2 -c100 -d15s --latency` 的候选 `/healthz` 矩阵；原始数据被忽略，汇总见 [`v1.0.0-rc.1-healthz-baseline.md`](benchmarks/v1.0.0-rc.1-healthz-baseline.md)。
 
 ### 第 23 章补充：Docker 快速启动教学
 

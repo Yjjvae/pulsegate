@@ -55,6 +55,7 @@ docker compose down --volumes
 
 将基准的候选 commit、硬件、内核、编译器、负载参数、三次原始 RPS/P99 和局限写入新的版本化报告；
 不要提交 `benchmarks/results/` 的机器相关原始文件。对当前已有数据，可参考
+[v1.0.0-rc.1 `/healthz` 候选基线](benchmarks/v1.0.0-rc.1-healthz-baseline.md) 和
 [v0.9.3 `/healthz` 基线](benchmarks/v0.9.3-healthz-baseline.md)。
 
 ## 正式发布步骤
