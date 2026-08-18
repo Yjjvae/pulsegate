@@ -3,6 +3,41 @@
 本日志从教程第四章开始记录项目的实际推进过程。日期统一使用
 `Asia/Shanghai` 时区；每条记录包含完成内容、验证结果、重要决策和遗留事项。
 
+## 2026-08-18
+
+### 第 23 章补充：Docker 快速启动教学
+
+完成内容：
+
+- 新增 `docs/docker-quickstart.md`，用最短路径说明 Docker 检查、Compose 启动、验证、日志、配置覆盖和清理；
+- 在 README 增加 Docker 快速教程入口；
+- 教程明确区分宿主机 Docker 权限问题、构建阶段代理和运行镜像，避免将代理或本地配置提交进仓库。
+
+### 第 24 章：GitHub Actions CI
+
+完成内容：
+
+- 新增最小权限的 `.github/workflows/ci.yml`，在推送 `main` 和向 `main` 提交 Pull Request 时触发；
+- 添加 GCC 与 Clang 的 Debug、`-Werror` 构建和 CTest 矩阵；
+- 添加 ASan/UBSan 构建与测试；TSan 改为每周定时或手动触发，避免拖慢普通 Pull Request；
+- 添加 `clang-format --dry-run --Werror` 和基于 `compile_commands.json` 的 clang-tidy；
+- 添加 Docker Compose 端到端冒烟测试：构建、健康检查、路由请求及单个上游停止后的故障切换；
+- CI 复用现有 clang toolchain：优先选择本机 `clang++-21`，不存在时使用系统提供的 `clang++`。
+
+重要决策：
+
+- 工作流只授予 `contents: read`，不在默认 CI 中使用 Secret 或写入仓库；
+- 并发工作流按分支取消旧运行，减少同一 PR 的重复资源消耗；
+- 不把依赖于 GitHub Hosted Runner 波动的 RPS 数值作为 CI 门禁。
+
+验证结果：
+
+- GCC Debug + `-Werror`：123/123 CTest 通过；
+- Clang Debug + `-Werror`：123/123 CTest 通过；
+- Clang ASan/UBSan：123/123 CTest 通过，未报告内存错误或未定义行为；
+- `clang-format --dry-run --Werror` 与 clang-tidy 通过；
+- `docker compose config` 通过；本机 Docker 守护进程在本次验证时不可连接，完整 Compose 冒烟测试交由首个远程 CI 运行复验。
+
 ## 2026-07-29
 
 ### 第四章：Git 与 GitHub 工作流准备
