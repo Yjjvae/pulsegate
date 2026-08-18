@@ -38,6 +38,23 @@
 - `clang-format --dry-run --Werror` 与 clang-tidy 通过；
 - `docker compose config` 通过；本机 Docker 守护进程在本次验证时不可连接，完整 Compose 冒烟测试交由首个远程 CI 运行复验。
 
+### 第 25 章：依赖管理
+
+完成内容：
+
+- 新增 `docs/dependencies.md`，记录每个当前依赖的用途、来源、固定版本/commit、许可证和升级流程；
+- 将 GoogleTest 改为始终使用项目固定的 hash 校验 archive，不再因开发机是否安装系统 GTest 而改变测试依赖；
+- 在 CMake 配置日志中输出实际 Boost 版本及固定的 yaml-cpp、GoogleTest revision；
+- GitHub Actions 从会滚动的 `ubuntu-latest` 固定到 `ubuntu-24.04`，与 Docker 的 Ubuntu 24.04 基础环境保持一致；
+- 明确当前不采用 Conan/vcpkg；未来迁移必须先写 ADR 并删除旧依赖来源。
+
+验证结果：
+
+- 从全新 `build/dependency-audit` 目录配置时，成功解析 Boost 1.90.0、yaml-cpp 0.8.0 固定 commit 与 GoogleTest 1.17.0 的 SHA-256 archive；
+- `-Werror` Debug 构建成功，123/123 CTest 通过；
+- 从全新 `build/dependency-release` 目录完成 Release 构建，只解析 yaml-cpp，确认不下载测试专用 GoogleTest；
+- clang-format 检查和 Git diff 格式检查通过。
+
 ## 2026-07-29
 
 ### 第四章：Git 与 GitHub 工作流准备

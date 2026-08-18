@@ -19,7 +19,7 @@ concurrency:
 jobs:
   build-and-test:
     name: ${{ matrix.compiler }} debug
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -60,7 +60,7 @@ jobs:
 
   asan-ubsan:
     name: ASan and UBSan
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
 
     steps:
@@ -95,7 +95,7 @@ jobs:
   tsan:
     name: TSan (scheduled)
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
 
     steps:
@@ -127,7 +127,7 @@ jobs:
 
   quality:
     name: Formatting and static analysis
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
 
     steps:
@@ -160,7 +160,7 @@ jobs:
 
   docker-compose:
     name: Docker Compose smoke test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
 
     steps:
