@@ -5,6 +5,23 @@
 
 ## 2026-08-18
 
+### v1.0 发布候选准备
+
+完成内容：
+
+- 将 CMake 项目版本提升至 `1.0.0`，并将候选二进制与 `/api/version` 标识为 `1.0.0-rc.1`；
+- 新增 `CHANGELOG.md`，说明候选包含的功能、CI 修复、已知限制和最近稳定 tag；
+- 新增 `docs/release-v1.0.md`，固化候选验收、性能/Compose 验收、正式 tag/Release 步骤以及不可重写 tag 的回滚策略；
+- README 更新为候选状态，并使用 `pulsegate:1.0.0-rc.1` 作为容器构建示例。
+
+验证结果：
+
+- Debug：123/123 CTest 通过；Release 可执行文件输出 `1.0.0-rc.1`；
+- ASan/UBSan（包括 `detect_stack_use_after_return=1`）：123/123 CTest 通过；
+- TSan：123/123 CTest 通过；
+- Parser fuzz：在临时语料上完成 10,000 次 libFuzzer smoke，未报告 ASan/UBSan 错误；
+- clang-format 和 `git diff --check` 通过。
+
 ### 第 23 章补充：Docker 快速启动教学
 
 完成内容：
