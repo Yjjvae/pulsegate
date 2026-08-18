@@ -54,15 +54,13 @@ void Listener::start() {
             return;
         }
         self->started_ = true;
-        runtime::spawnGuarded(
-            self->strand_, "listener.accept_loop",
-            [self]() -> Awaitable<void> { co_await self->acceptLoop(); },
-            [self](std::string_view operation, std::exception_ptr error) {
-                self->stopInExecutor();
-                if (self->on_error_) {
-                    self->on_error_(operation, error);
-                }
-            });
+        runtime::spawnGuarded(self->strand_, "listener.accept_loop", self->acceptLoop(),
+                              [self](std::string_view operation, std::exception_ptr error) {
+                                  self->stopInExecutor();
+                                  if (self->on_error_) {
+                                      self->on_error_(operation, error);
+                                  }
+                              });
     });
 }
 

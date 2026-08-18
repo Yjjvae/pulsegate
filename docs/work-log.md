@@ -68,6 +68,20 @@
 - 全新 Clang ASan/UBSan 构建成功，123/123 CTest 通过，未报告 Sanitizer 错误；
 - `git diff --check` 通过。
 
+### CI 修复：协程生命周期
+
+完成内容：
+
+- ASan 在 `AsyncHttpServerTest.StopWinsOverPendingTimeoutAndClosesOnlyOnce` 中发现 `stack-use-after-return`；根因是顶层协程由带捕获的 lambda 创建，lambda 临时对象销毁后协程仍会访问其捕获；
+- 将 `spawnGuarded` 改为直接接收 `boost::asio::awaitable<void>`，从接口上杜绝该不安全的协程 lambda 用法；
+- Listener、HTTP Session 与 HealthChecker 的顶层协程改为直接传入成员协程，并由完成回调持有对象的 `shared_ptr`，保证整个协程生命周期内对象有效。
+
+验证结果：
+
+- Clang Debug + `-Werror`：123/123 CTest 通过；
+- Clang ASan/UBSan（启用 `detect_stack_use_after_return=1`）：123/123 CTest 通过；
+- clang-format 与 `git diff --check` 通过。
+
 ## 2026-07-29
 
 ### 第四章：Git 与 GitHub 工作流准备
