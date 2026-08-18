@@ -36,6 +36,18 @@ FetchContent_Declare(
   GIT_SHALLOW TRUE
 )
 FetchContent_MakeAvailable(yaml_cpp)
+# yaml-cpp 0.8.0 emits -Wshadow diagnostics with the Clang version on the
+# Ubuntu 24.04 GitHub runner. It is a third-party interface, so expose its
+# headers as SYSTEM to keep -Werror focused on PulseGate source files.
+get_target_property(PULSEGATE_YAML_CPP_INCLUDE_DIRS yaml-cpp INTERFACE_INCLUDE_DIRECTORIES)
+if(PULSEGATE_YAML_CPP_INCLUDE_DIRS)
+  set_property(
+    TARGET yaml-cpp
+    APPEND
+    PROPERTY INTERFACE_SYSTEM_INCLUDE_DIRECTORIES
+      "${PULSEGATE_YAML_CPP_INCLUDE_DIRS}"
+  )
+endif()
 message(
   STATUS
   "PulseGate dependency: yaml-cpp ${PULSEGATE_YAML_CPP_VERSION} (${PULSEGATE_YAML_CPP_REVISION})"
