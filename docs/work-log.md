@@ -55,6 +55,33 @@
 - 从全新 `build/dependency-release` 目录完成 Release 构建，只解析 yaml-cpp，确认不下载测试专用 GoogleTest；
 - clang-format 检查和 Git diff 格式检查通过。
 
+### CI 修复：第三方头文件告警
+
+完成内容：
+
+- 根据 PR #31 的远程失败日志定位到 yaml-cpp 0.8.0 的 `-Wshadow` 告警；项目的 `-Werror` 将该第三方头文件告警升级为构建错误；
+- 将 `yaml-cpp` 的公开包含目录标记为 CMake `SYSTEM`，使其以编译器的 `-isystem` 方式引入；PulseGate 自身源码仍保持全部严格告警和 `-Werror`。
+
+验证结果：
+
+- 全新 Clang Debug + `-Werror` 构建成功，123/123 CTest 通过；编译命令确认 yaml-cpp 使用 `-isystem`；
+- 全新 Clang ASan/UBSan 构建成功，123/123 CTest 通过，未报告 Sanitizer 错误；
+- `git diff --check` 通过。
+
+### CI 修复：协程生命周期
+
+完成内容：
+
+- ASan 在 `AsyncHttpServerTest.StopWinsOverPendingTimeoutAndClosesOnlyOnce` 中发现 `stack-use-after-return`；根因是顶层协程由带捕获的 lambda 创建，lambda 临时对象销毁后协程仍会访问其捕获；
+- 将 `spawnGuarded` 改为直接接收 `boost::asio::awaitable<void>`，从接口上杜绝该不安全的协程 lambda 用法；
+- Listener、HTTP Session 与 HealthChecker 的顶层协程改为直接传入成员协程，并由完成回调持有对象的 `shared_ptr`，保证整个协程生命周期内对象有效。
+
+验证结果：
+
+- Clang Debug + `-Werror`：123/123 CTest 通过；
+- Clang ASan/UBSan（启用 `detect_stack_use_after_return=1`）：123/123 CTest 通过；
+- clang-format 与 `git diff --check` 通过。
+
 ## 2026-07-29
 
 ### 第四章：Git 与 GitHub 工作流准备

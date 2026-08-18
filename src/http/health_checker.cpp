@@ -65,9 +65,9 @@ void HealthChecker::stop() {
 void HealthChecker::startInStrand() {
     if (started_ || stopping_) return;
     started_ = true;
-    runtime::spawnGuarded(
-        strand_, "health_checker",
-        [self = shared_from_this()]() -> net::Awaitable<void> { co_await self->run(); }, {});
+    const auto self = shared_from_this();
+    runtime::spawnGuarded(strand_, "health_checker", self->run(),
+                          [self](std::string_view, std::exception_ptr) {});
 }
 
 void HealthChecker::stopInStrand() {
@@ -86,12 +86,10 @@ net::Awaitable<void> HealthChecker::run() {
             next_endpoint_ = (next_endpoint_ + 1) % endpoints_.size();
             const auto probe_id = next_probe_id_++;
             ++active_probes_;
-            runtime::spawnGuarded(
-                strand_, "health_checker.probe",
-                [self = shared_from_this(), endpoint, probe_id]() -> net::Awaitable<void> {
-                    co_await self->probeAndPublish(endpoint, probe_id);
-                },
-                {});
+            const auto self = shared_from_this();
+            runtime::spawnGuarded(strand_, "health_checker.probe",
+                                  self->probeAndPublish(endpoint, probe_id),
+                                  [self](std::string_view, std::exception_ptr) {});
         }
         interval_timer_.expires_after(config_.interval);
         net::ErrorCode error;

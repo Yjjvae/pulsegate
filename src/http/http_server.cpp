@@ -224,13 +224,11 @@ HttpSession::HttpSession(net::tcp::socket socket, std::shared_ptr<Router> router
 
 void HttpSession::start() {
     const auto self = shared_from_this();
-    runtime::spawnGuarded(
-        socket_.get_executor(), "http_session",
-        [self]() -> net::Awaitable<void> { co_await self->run(); },
-        [self](std::string_view operation, std::exception_ptr error) {
-            self->closeInExecutor(StopReason::InternalError);
-            logCoroutineFailure(operation, error);
-        });
+    runtime::spawnGuarded(socket_.get_executor(), "http_session", self->run(),
+                          [self](std::string_view operation, std::exception_ptr error) {
+                              self->closeInExecutor(StopReason::InternalError);
+                              logCoroutineFailure(operation, error);
+                          });
 }
 
 void HttpSession::stop(StopReason reason) {
