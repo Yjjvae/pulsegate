@@ -2,13 +2,15 @@
 
 PulseGate 是一个用 C++20 和 Boost.Asio 逐步实现的 HTTP 网关学习项目。
 
-当前开发进度是教程第 23 章“Docker 容器化”。当前开发版本为 `0.9.3`；最近发布
+当前开发进度是教程第 24 章“GitHub Actions CI”。当前开发版本为 `0.9.3`；最近发布
 标签为 `v0.8.2`。主程序使用一个 `io_context` 和可配置数量的工作线程；每条
 Session 仍有自己的 strand，因此并发不会让单条连接的状态并行修改。
 
 完整教学见 [PROJECT_TUTORIAL.md](PROJECT_TUTORIAL.md)。
 
 按日期记录的实际推进过程见 [docs/work-log.md](docs/work-log.md)。
+
+从零启动 Docker Compose 演示环境见 [docs/docker-quickstart.md](docs/docker-quickstart.md)。
 
 ## 当前能力
 
@@ -38,7 +40,8 @@ Session 仍有自己的 strand，因此并发不会让单条连接的状态并�
 - GoogleTest + CTest；
 - HTTP Parser 的 Clang libFuzzer 目标、语料目录和最小化崩溃回归流程；
 - Debug、Release、ASan/UBSan、TSan 独立预设；
-- clang-format、clang-tidy、Boost.Asio handler tracking 与 GitHub 协作模板。
+- clang-format、clang-tidy、Boost.Asio handler tracking 与 GitHub 协作模板；
+- GitHub Actions：GCC/Clang、ASan/UBSan、定期 TSan、格式化、静态分析与 Docker Compose 冒烟测试。
 
 ## 环境要求
 

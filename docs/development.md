@@ -278,3 +278,38 @@ curl --noproxy '*' --include -X POST --data-binary 'hello proxy' \
 - `Connection`、`Keep-Alive`、`TE`、`Trailer`、`Transfer-Encoding`、`Upgrade` 以及
   `Connection` 点名字段不会被转发；网关重建 `Host`、转发链与 request ID；
 - WebSocket Upgrade 返回 501；请求 chunked、自动重试、主动健康检查和跨事务连接池不属于本阶段。
+
+## 第 24 章：本地复现 CI
+
+GitHub Actions 会在 Pull Request 和 `main` 推送时执行 GCC、Clang、ASan/UBSan、格式化、clang-tidy
+及 Docker Compose 冒烟测试。提交前最小复现方式：
+
+```bash
+# 常规构建与测试
+cmake --preset debug
+cmake --build --preset debug
+ctest --preset debug
+
+# 内存与未定义行为检查
+cmake --preset asan
+cmake --build --preset asan
+ASAN_OPTIONS=detect_leaks=1:halt_on_error \
+UBSAN_OPTIONS=print_stacktrace=1:halt_on_error \
+ctest --preset asan
+
+# 格式与静态分析
+git ls-files -z -- '*.cpp' '*.h' | xargs -0 -r clang-format --dry-run --Werror
+cmake --preset clang-tidy
+git ls-files -z -- 'app/*.cpp' 'src/*.cpp' 'tests/*.cpp' | \
+  xargs -0 -r clang-tidy -p build/clang-tidy --quiet
+
+# 容器端到端演示
+docker compose up --build -d
+curl --fail http://127.0.0.1:8080/livez
+curl --fail http://127.0.0.1:8080/api/hello
+docker compose down
+```
+
+TSan 运行时间和资源开销更高，因此 CI 设为每周定时或手动触发；本地需要时执行
+`cmake --preset tsan && cmake --build --preset tsan && ctest --preset tsan`。Docker 守护进程未启动或
+没有 socket 权限时，先解决 `docker info` 的报错，再运行 Compose 命令。
