@@ -2,7 +2,7 @@
 
 PulseGate 是一个用 C++20 和 Boost.Asio 逐步实现的 HTTP 网关学习项目。
 
-当前开发进度是教程第 24 章“GitHub Actions CI”。当前开发版本为 `0.9.3`；最近发布
+当前开发进度是教程第 25 章“依赖管理”。当前开发版本为 `0.9.3`；最近发布
 标签为 `v0.8.2`。主程序使用一个 `io_context` 和可配置数量的工作线程；每条
 Session 仍有自己的 strand，因此并发不会让单条连接的状态并行修改。
 
@@ -35,7 +35,7 @@ Session 仍有自己的 strand，因此并发不会让单条连接的状态并�
 - 路由显式启用的分片 LRU + TTL 响应缓存：按总字节数有界淘汰，保护 Authorization/Cookie/Set-Cookie 等敏感响应；
 - 每端点 Closed/Open/Half-Open 熔断器：连续上游失败后快速拒绝，冷却后限制探测请求；
 - 代理全局 in-flight 上限、连接池 waiter 上限与显式 503/Retry-After 过载反馈；
-- 集中管理、固定版本的 yaml-cpp 配置依赖；YAML 配置解析、聚合校验与不可变 reload 快照；
+- 集中管理依赖：系统 Boost 1.83+、固定 commit 的 yaml-cpp、hash 校验的 GoogleTest，以及许可证/升级流程；
 - 有界异步 JSON/text access log、日志丢弃计数，以及低基数 Prometheus `/metrics`；
 - GoogleTest + CTest；
 - HTTP Parser 的 Clang libFuzzer 目标、语料目录和最小化崩溃回归流程；
@@ -52,8 +52,9 @@ Session 仍有自己的 strand，因此并发不会让单条连接的状态并�
 - Make 或 Ninja；
 - Git。
 
-如果系统没有 GoogleTest，首次 Debug/ASan/TSan 配置会从官方仓库下载固定的
-GoogleTest 1.17.0 源码并校验 SHA-256。之后复用对应构建目录中的依赖。
+首次 Debug/ASan/TSan 配置会从官方仓库下载固定的 yaml-cpp 0.8.0 commit 和
+GoogleTest 1.17.0（SHA-256 校验）源码；之后复用对应构建目录中的依赖。Boost 则使用系统提供的
+1.83+ 头文件。完整依赖清单、许可证和升级规则见 [docs/dependencies.md](docs/dependencies.md)。
 
 Ubuntu 24.04 的基础依赖示例：
 

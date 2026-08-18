@@ -9,6 +9,17 @@ if(POLICY CMP0167)
   cmake_policy(SET CMP0167 NEW)
 endif()
 find_package(Boost 1.83 REQUIRED)
+message(STATUS "PulseGate dependency: Boost ${Boost_VERSION} from the system package")
+
+# Dependency policy:
+# - Boost is supplied by the pinned Ubuntu 24.04 base used in CI and Docker.
+# - Source dependencies below are owned by this project and must use immutable
+#   revisions. Do not add a second package-manager source for the same library.
+set(PULSEGATE_YAML_CPP_VERSION "0.8.0")
+set(PULSEGATE_YAML_CPP_REVISION "f7320141120f720aecc4c32be25586e7da9eb978")
+set(PULSEGATE_GOOGLETEST_VERSION "1.17.0")
+set(PULSEGATE_GOOGLETEST_REVISION "52eb8108c5bdec04579160ae17225d66034bd723")
+set(PULSEGATE_GOOGLETEST_SHA256 "745c55415660044610f7fcd3af7a6420d5de16a7dbb9ebfe2e131275676232be")
 
 # Configuration is parsed through one project-owned boundary. Pinning a commit
 # avoids silently changing YAML semantics when a moving dependency tag changes.
@@ -21,28 +32,31 @@ set(YAML_CPP_INSTALL OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(
   yaml_cpp
   GIT_REPOSITORY https://github.com/jbeder/yaml-cpp.git
-  GIT_TAG f7320141120f720aecc4c32be25586e7da9eb978 # yaml-cpp 0.8.0
+  GIT_TAG ${PULSEGATE_YAML_CPP_REVISION} # yaml-cpp ${PULSEGATE_YAML_CPP_VERSION}
   GIT_SHALLOW TRUE
 )
 FetchContent_MakeAvailable(yaml_cpp)
+message(
+  STATUS
+  "PulseGate dependency: yaml-cpp ${PULSEGATE_YAML_CPP_VERSION} (${PULSEGATE_YAML_CPP_REVISION})"
+)
 
 if(PULSEGATE_BUILD_TESTS)
-  find_package(GTest CONFIG QUIET)
+  # Always fetch this hash-verified archive. A system GTest may be convenient,
+  # but silently selecting it would make test behavior vary across developers.
+  set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
+  set(BUILD_GMOCK OFF CACHE BOOL "" FORCE)
 
-  if(NOT TARGET GTest::gtest_main)
-    message(STATUS "System GoogleTest not found; fetching pinned GoogleTest 1.17.0")
-
-    set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
-    set(BUILD_GMOCK OFF CACHE BOOL "" FORCE)
-
-    FetchContent_Declare(
-      googletest
-      URL
-        https://github.com/google/googletest/archive/52eb8108c5bdec04579160ae17225d66034bd723.tar.gz
-      URL_HASH
-        SHA256=745c55415660044610f7fcd3af7a6420d5de16a7dbb9ebfe2e131275676232be
-      DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-    )
-    FetchContent_MakeAvailable(googletest)
-  endif()
+  FetchContent_Declare(
+    googletest
+    URL
+      https://github.com/google/googletest/archive/${PULSEGATE_GOOGLETEST_REVISION}.tar.gz
+    URL_HASH SHA256=${PULSEGATE_GOOGLETEST_SHA256}
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+  )
+  FetchContent_MakeAvailable(googletest)
+  message(
+    STATUS
+    "PulseGate dependency: GoogleTest ${PULSEGATE_GOOGLETEST_VERSION} (${PULSEGATE_GOOGLETEST_REVISION})"
+  )
 endif()
