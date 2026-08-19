@@ -3,10 +3,10 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的结构，并使用
 [Semantic Versioning](https://semver.org/lang/zh-CN/) 管理版本。只有通过发布清单的 tag 才是正式发布。
 
-## [1.0.0-rc.1] - 2026-08-18
+## [1.0.0] - 2026-08-19
 
-这是 `v1.0.0` 的发布候选，不是正式稳定版。正式发布前仍需完成
-[v1.0 发布准备](docs/release-v1.0.md) 中记录的候选验收与人工发布步骤。
+这是首个稳定 `v1.0.0` 发布。发布前验收、性能基线和回滚策略见
+[v1.0 发布准备](docs/release-v1.0.md)。
 
 ### Added
 
@@ -19,13 +19,14 @@
 
 ### Changed
 
-- CMake 项目版本升级至 `1.0.0`；二进制和 `/api/version` 在候选期显示 `1.0.0-rc.1`；
+- CMake 项目、二进制和 `/api/version` 统一为 `1.0.0`；
 - yaml-cpp 公开头文件以系统包含目录处理，保持项目自身的严格 `-Werror` 质量门禁。
 
 ### Fixed
 
 - 顶层受保护协程不再通过带捕获的临时 coroutine lambda 启动，避免异步恢复时访问已销毁捕获导致的
   `stack-use-after-return`。
+- 文件线程池读取会持有回调执行器的 work guard，避免 `io_context` 退出后仍向其投递回调的 TSan 数据竞争。
 
 ### Known limitations
 
@@ -35,4 +36,4 @@
 
 ## [0.8.2] - 2026-08-11
 
-- 最近一个正式发布标签；后续开发功能已汇总进 `1.0.0-rc.1`。
+- `v1.0.0` 之前最近的正式发布标签。
