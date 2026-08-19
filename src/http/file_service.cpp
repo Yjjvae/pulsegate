@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <boost/asio/async_result.hpp>
+#include <boost/asio/executor_work_guard.hpp>
 #include <boost/asio/post.hpp>
 #include <cctype>
 #include <fstream>
@@ -72,15 +73,21 @@ net::Awaitable<FileResult> BoundedFileService::read(net::asio::any_io_executor r
                                     [handler] { (*handler)(failure(FileStatus::Busy)); });
                     return;
                 }
-                net::asio::post(
-                    pool_, [this, reply_executor, path = std::move(path), maximum_bytes, handler] {
-                        auto file_result = readInWorker(path, maximum_bytes);
-                        releaseSlot();
-                        net::asio::post(reply_executor,
-                                        [handler, file_result = std::move(file_result)]() mutable {
-                                            (*handler)(std::move(file_result));
-                                        });
-                    });
+                // The blocking-pool job outlives this initiation function. Keep the caller's
+                // event loop alive until its completion has been posted back and invoked.
+                // Without this guard, an io_context with no other work can exit and be
+                // destroyed while the worker thread is still posting the reply.
+                auto reply_work = net::asio::make_work_guard(reply_executor);
+                net::asio::post(pool_, [this, reply_executor, reply_work, path = std::move(path),
+                                        maximum_bytes, handler] {
+                    auto file_result = readInWorker(path, maximum_bytes);
+                    releaseSlot();
+                    net::asio::post(
+                        reply_executor,
+                        [handler, reply_work, file_result = std::move(file_result)]() mutable {
+                            (*handler)(std::move(file_result));
+                        });
+                });
             },
             net::use_awaitable);
     co_return result;

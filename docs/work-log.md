@@ -23,6 +23,21 @@
 - clang-format 和 `git diff --check` 通过。
 - 已完成 `1/2/4/8` worker、每组 3 次、`wrk -t2 -c100 -d15s --latency` 的候选 `/healthz` 矩阵；原始数据被忽略，汇总见 [`v1.0.0-rc.1-healthz-baseline.md`](benchmarks/v1.0.0-rc.1-healthz-baseline.md)。
 
+## 2026-08-19
+
+### CI 修复：文件读取回调的执行器生命周期
+
+完成内容：
+
+- 手动触发的 TSan 在 `StaticFileHandlerTest.ServesBoundedFileAndRejectsTraversal` 中发现数据竞争：文件线程池工作完成后仍可能向已经退出的调用方 `io_context` 投递回调；
+- `BoundedFileService::read` 为回调执行器持有 Asio work guard，并将其传递到线程池任务及回投回调，确保回调执行前事件循环不会退出。
+
+验证结果：
+
+- TSan 定向测试 `StaticFileHandlerTest.ServesBoundedFileAndRejectsTraversal` 通过；
+- TSan 全量 CTest：123/123 通过，未报告 ThreadSanitizer 错误；
+- clang-format 与 `git diff --check` 通过。
+
 ### 第 23 章补充：Docker 快速启动教学
 
 完成内容：
