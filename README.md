@@ -2,8 +2,8 @@
 
 PulseGate 是一个用 C++20 和 Boost.Asio 逐步实现的 HTTP 网关学习项目。
 
-当前开发进度是教程第 25 章“依赖管理”。当前发布候选版本为 `1.0.0-rc.1`；最近发布
-标签为 `v0.8.2`。正式 `v1.0.0` 的验收范围和发布/回滚步骤见
+当前开发进度是教程第 25 章“依赖管理”。当前稳定版本为 `1.0.0`；正式 `v1.0.0`
+的验收范围和发布/回滚步骤见
 [v1.0 发布准备](docs/release-v1.0.md)。主程序使用一个 `io_context` 和可配置数量的工作线程；每条
 Session 仍有自己的 strand，因此并发不会让单条连接的状态并行修改。
 
@@ -366,8 +366,8 @@ docker compose build \
 运行时镜像也可以单独检查：
 
 ```bash
-docker build --target runtime -t pulsegate:1.0.0-rc.1 .
-docker run --rm --read-only --tmpfs /tmp --user 10001:10001 pulsegate:1.0.0-rc.1 --version
+docker build --target runtime -t pulsegate:1.0.0 .
+docker run --rm --read-only --tmpfs /tmp --user 10001:10001 pulsegate:1.0.0 --version
 ```
 
 基础镜像使用 Ubuntu 的固定发行版标签 `24.04`，生产发布应进一步锁定到 digest，并配合镜像扫描或 SBOM

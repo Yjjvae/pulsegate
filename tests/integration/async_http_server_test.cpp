@@ -643,7 +643,7 @@ TEST(AsyncHttpServerTest, ServesDefaultAsyncRoutesAndSplitEchoBody) {
 
     const auto version = exchange(
         server, {"GET /api/version HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"});
-    EXPECT_NE(version.find("1.0.0-rc.1\n"), std::string::npos);
+    EXPECT_NE(version.find("1.0.0\n"), std::string::npos);
 
     const auto metrics =
         exchange(server, {"GET /metrics HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"});

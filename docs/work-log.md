@@ -25,6 +25,20 @@
 
 ## 2026-08-19
 
+### v1.0.0 正式发布分支
+
+完成内容：
+
+- 将二进制与 `/api/version` 从 `1.0.0-rc.1` 提升为正式 `1.0.0`，并同步单元/集成测试、README Docker 示例和 changelog；
+- 将生成的 `docs/architecture-stage5.html` 加入 `.gitignore`，避免本地演示产物进入发布历史。
+
+验证结果：
+
+- Debug：123/123 CTest 通过；
+- Release：构建成功，`pulsegate --version` 输出 `1.0.0`；
+- ASan/UBSan：123/123 CTest 通过；
+- 前一候选提交上的 TSan：123/123 CTest 通过，且包含文件读取回调生命周期修复。
+
 ### CI 修复：文件读取回调的执行器生命周期
 
 完成内容：
