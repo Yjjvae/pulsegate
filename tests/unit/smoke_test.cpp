@@ -7,7 +7,7 @@
 #include "pulsegate/core/version.h"
 
 TEST(CoreSmokeTest, ReportsProjectVersion) {
-    EXPECT_EQ(pulsegate::core::version(), "0.9.3");
+    EXPECT_EQ(pulsegate::core::version(), "1.0.0-rc.1");
 }
 
 TEST(AsioSmokeTest, ExecutesPostedHandler) {
