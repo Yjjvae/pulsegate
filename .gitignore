@@ -13,3 +13,4 @@ perf.data*
 .env
 config/pulsegate.local.yaml
 /.playwright-mcp/
+docs/architecture-stage5.html
