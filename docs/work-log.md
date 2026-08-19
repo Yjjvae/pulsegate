@@ -970,6 +970,22 @@
 - Ubuntu `24.04` 是固定发行版而非 `latest`，但不是不可变 digest；发布流水线应按扫描/SBOM 的更新节奏把
   它收紧为具体 digest。
 
+## 2026-08-19
+
+### 项目命名：仓库统一为 PulseGate
+
+完成内容：
+
+- 将 GitHub 仓库从 `Yjjvae/http_server` 重命名为 `Yjjvae/pulsegate`；
+- 同步本地 `origin` 到 `https://github.com/Yjjvae/pulsegate.git`；
+- 更新教程目录示例和 Docker 快速开始中的项目目录名称。
+
+重要决策：
+
+- 保留代码中的 `http_server` 模块与文件名：它们描述 HTTP 服务实现，不等同于项目品牌；
+- 保留早期工作日志内的旧仓库地址，确保历史记录与当时实际状态一致；
+- 项目对外统一使用 PulseGate，避免 `http_server` 这一通用名称弱化项目辨识度。
+
 ## 后续记录模板
 
 ```markdown

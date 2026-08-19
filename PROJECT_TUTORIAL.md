@@ -214,7 +214,7 @@ Ubuntu 22.04 默认 Boost 版本低于本教程基线；若使用 22.04，应通
 项目最终建议形成下面的结构。不要第一天创建全部空文件，而是在对应阶段逐步增加。
 
 ```text
-http_server/
+pulsegate/
 ├── .github/
 │   ├── ISSUE_TEMPLATE/
 │   │   ├── bug.yml
