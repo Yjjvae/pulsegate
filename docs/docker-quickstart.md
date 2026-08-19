@@ -23,7 +23,7 @@ sudo usermod -aG docker "$USER"
 进入项目根目录并检查 Compose 文件：
 
 ```bash
-cd /home/yjavae/projects/cpp/pulsegate
+cd /path/to/pulsegate
 docker compose config
 ```
 
